@@ -15,7 +15,7 @@ st.write(
 
 
 def clean_text(text):
-    """Invalid file name characters hatane ke liye"""
+    """File name safe characters"""
     if not text:
         return ""
     clean = re.sub(r'[\\/*?:"<>|\n\r\t]', " ", text)
@@ -24,27 +24,38 @@ def clean_text(text):
 
 
 def extract_info_from_slide(slide):
-    """Exact text matching for Outlet Name, Contact, Type, and Size"""
-    full_text = ""
+    """Accurate Extraction logic based on actual PPT layout"""
+    all_lines = []
+
+    # Slide ke sabhi shapes/text frames se lines collect karein
     for shape in slide.shapes:
         if shape.has_text_frame:
-            full_text += "\n" + shape.text_frame.text
+            for paragraph in shape.text_frame.paragraphs:
+                text = paragraph.text.strip()
+                if text:
+                    all_lines.append(text)
+
+    full_text = "\n".join(all_lines)
 
     outlet_name = ""
     contact_no = ""
     media_type = ""
     size = ""
 
-    # 1. Outlet Name: 'Outlet Name:' se lekar agli line/label tak ka exact text
+    # 1. Outlet Name: 'Outlet Name:' ke aage ka text (e.g., MD SHOE, GIRJA FOOTWEAR)
     outlet_match = re.search(
-        r"Outlet\s*Name\s*[:\-]\s*(.*?)(?=\n|Address|City|Contact|Installation|Type|Size|$)",
-        full_text,
-        re.IGNORECASE,
+        r"Outlet\s*Name\s*[:\-]\s*(.*)", full_text, re.IGNORECASE
     )
     if outlet_match:
-        outlet_name = outlet_match.group(1).strip()
+        raw_name = outlet_match.group(1).strip()
+        # Agar address usi line me judi ho toh usko split karein
+        outlet_name = re.split(
+            r"Address|City|Contact|Installation|Type|Size",
+            raw_name,
+            flags=re.IGNORECASE,
+        )[0].strip()
 
-    # 2. Contact No: 10 digit Mobile Number
+    # 2. Contact Number: Contact No: 7282007564 ya koi bhi 10 digit number
     contact_match = re.search(
         r"Contact\s*(?:No)?\s*[:\-]?\s*(\d{10})", full_text, re.IGNORECASE
     )
@@ -55,16 +66,18 @@ def extract_info_from_slide(slide):
         if num_match:
             contact_no = num_match.group(0)
 
-    # 3. Type: 'Type:' ke aage ka text (FL, NL, etc.) - Ignore 'Outlet' word
+    # 3. Type: Dedicated search for 'Type:' box (e.g., NL, FL) - Strictly ignore 'Outlet'
     type_match = re.search(
-        r"(?<!Outlet\s)Type\s*[:\-]\s*([A-Za-z0-9_\-]+)", full_text, re.IGNORECASE
+        r"\bType\s*[:\-]\s*([A-Za-z0-9_\-]+)", full_text, re.IGNORECASE
     )
     if type_match:
-        media_type = type_match.group(1).strip()
+        extracted_type = type_match.group(1).strip()
+        if extracted_type.lower() != "outlet":
+            media_type = extracted_type
 
-    # 4. Size: 'Size:' ke aage ka text (e.g., 10x4 ya 10 x 4)
+    # 4. Size: Dedicated search for 'Size:' box (e.g., 10 x 3, 8 x 3)
     size_match = re.search(
-        r"Size\s*[:\-]\s*(\d+\s*x\s*\d+)", full_text, re.IGNORECASE
+        r"\bSize\s*[:\-]\s*(\d+\s*x\s*\d+)", full_text, re.IGNORECASE
     )
     if size_match:
         size = size_match.group(1).replace(" ", "").strip()
@@ -85,18 +98,17 @@ if uploaded_file is not None:
                     extract_info_from_slide(slide)
                 )
 
-                # Slide ke saare picture shapes
+                # Slide ke sabhi picture shapes
                 pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
 
                 if pic_shapes:
-                    # Horizontal position (left) ke basis par Leftmost Image select karein
+                    # Sirf LEFT side wali image pick karein
                     leftmost_pic = min(pic_shapes, key=lambda s: s.left)
 
-                    # Agar Name na mile toh slide number fallback
                     if not outlet_name:
                         outlet_name = f"Slide_{i+1}"
 
-                    # Exact Order: Name -> Number -> Type -> Size
+                    # Final Naming Array
                     components = []
                     if outlet_name:
                         components.append(clean_text(outlet_name))
@@ -113,7 +125,7 @@ if uploaded_file is not None:
 
                     zip_file.writestr(final_name, leftmost_pic.image.blob)
 
-    st.success("🎉 Process Complete!")
+    st.success("🎉 Processing Complete!")
     st.download_button(
         label="📥 Download Renamed Images (ZIP)",
         data=zip_buffer.getvalue(),
