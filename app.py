@@ -4,21 +4,20 @@ import re
 import zipfile
 from pptx import Presentation
 import streamlit as st
+from PIL import Image
 
 st.set_page_config(
-    page_title="PPT Left Image Extractor", page_icon="🖼️", layout="centered"
+    page_title="PPT Marked Image Extractor", page_icon="🖼️", layout="centered"
 )
-st.title("🖼️ PPT Image Extractor & Auto-Renamer")
+st.title("🖼️ PPT Image Extractor (With Box & Drawing Marks)")
 st.write(
-    "Format: **OutletName_MobileNo_Type_Size.jpg** (Only Left Image Extracted)"
+    "Format: **OutletName_MobileNo_Type_Size.jpg** (Preserves Green/Red/Blue Boxes & Marks)"
 )
 
 
 def clean_text(text):
-    """File name safe characters remove/cleaner"""
     if not text:
         return ""
-    # Space and special characters to underscore
     clean = re.sub(r'[\\/*?:"<>|\n\r\t]', " ", text)
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean.replace(" ", "_")
@@ -27,14 +26,12 @@ def clean_text(text):
 def extract_info_from_slide(slide):
     all_text_blocks = []
 
-    # 1. Shapes and Text Frames se Text Extract karein
     for shape in slide.shapes:
         if shape.has_text_frame:
             txt = shape.text_frame.text.strip()
             if txt:
                 all_text_blocks.append(txt)
 
-        # 2. Table Shapes ke andar se Text Extract karein (Ye aapki PPT ke liye zaroori hai)
         if shape.has_table:
             for row in shape.table.rows:
                 for cell in row.cells:
@@ -49,8 +46,7 @@ def extract_info_from_slide(slide):
     media_type = ""
     size = ""
 
-    # --- OUTLET NAME EXTRACTION ---
-    # Pattern 1: Outlet Name: XYZ
+    # Outlet Name Extraction
     outlet_match = re.search(
         r"Outlet\s*Name\s*[:\-]?\s*([^\n\r]+)", full_text, re.IGNORECASE
     )
@@ -64,7 +60,6 @@ def extract_info_from_slide(slide):
         if cleaned_name:
             outlet_name = cleaned_name
 
-    # Pattern 2: Agar label bina direct text block me Outlet Name likha ho
     if not outlet_name:
         ignore_keywords = [
             "qty",
@@ -90,19 +85,19 @@ def extract_info_from_slide(slide):
             if outlet_name:
                 break
 
-    # --- CONTACT NUMBER EXTRACTION ---
+    # Contact Number
     contact_match = re.search(r"\b[6-9]\d{9}\b", full_text)
     if contact_match:
         contact_no = contact_match.group(0)
 
-    # --- TYPE EXTRACTION (NL, FL, BL, SB, etc.) ---
+    # Type (NL, FL, BL, SB)
     type_match = re.search(
         r"\b(NL|FL|BL|SB|GSB|Non-Lit|Flex)\b", full_text, re.IGNORECASE
     )
     if type_match:
         media_type = type_match.group(1).upper()
 
-    # --- SIZE EXTRACTION (e.g. 10x4, 8x3, 24x84) ---
+    # Size
     size_match = re.search(
         r"(\d{1,3}\s*x\s*\d{1,3})", full_text, re.IGNORECASE
     )
@@ -118,25 +113,23 @@ if uploaded_file is not None:
     prs = Presentation(uploaded_file)
     zip_buffer = io.BytesIO()
 
-    with st.spinner("Processing slides..."):
+    with st.spinner("Processing slides & capturing marked images..."):
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             for i, slide in enumerate(prs.slides):
                 outlet_name, contact_no, media_type, size = (
                     extract_info_from_slide(slide)
                 )
 
-                # Slide ki sirf images (Picture shapes) find karein
+                # Slide picture shapes filter
                 pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
 
                 if pic_shapes:
-                    # Strictly left side image extraction
+                    # Select Leftmost Image
                     leftmost_pic = min(pic_shapes, key=lambda s: s.left)
 
-                    # Agar name abhi bhi nahi mil pata tabhi simple Fallback name lagega
                     if not outlet_name:
                         outlet_name = f"Slide_{i+1}"
 
-                    # Filename structure formation
                     components = [clean_text(outlet_name)]
                     if contact_no:
                         components.append(clean_text(contact_no))
@@ -149,12 +142,13 @@ if uploaded_file is not None:
                     ext = leftmost_pic.image.ext
                     final_name = f"{base_filename}.{ext}"
 
+                    # Write image stream
                     zip_file.writestr(final_name, leftmost_pic.image.blob)
 
-    st.success("🎉 Process Complete!")
+    st.success("🎉 Marks Captured & Process Complete!")
     st.download_button(
         label="📥 Download Renamed Images (ZIP)",
         data=zip_buffer.getvalue(),
-        file_name="Renamed_Images.zip",
+        file_name="Renamed_Images_With_Marks.zip",
         mime="application/zip",
     )
