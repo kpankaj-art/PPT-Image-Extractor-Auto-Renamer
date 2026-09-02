@@ -1,2 +1,5 @@
 streamlit
 python-pptx
+pillow
+fitz
+PyMuPDF
