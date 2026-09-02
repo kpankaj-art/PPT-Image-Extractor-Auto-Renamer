@@ -1,19 +1,16 @@
 import io
-import os
 import re
-import subprocess
 import zipfile
-import fitz  # PyMuPDF (pip install pymupdf)
 from pptx import Presentation
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageDraw
 
 st.set_page_config(
     page_title="PPT Marked Image Extractor", page_icon="🖼️", layout="centered"
 )
-st.title("🖼️ PPT Image Extractor (With Drawing Marks Included)")
+st.title("🖼️ PPT Image Extractor (With Drawing Marks)")
 st.write(
-    "Format: **OutletName_MobileNo_Type_Size.jpg** (Preserves Green Box Marks)"
+    "Format: **OutletName_MobileNo_Type_Size.jpg** (Preserves Green/Red Box Marks)"
 )
 
 
@@ -96,105 +93,96 @@ def extract_info_from_slide(slide):
     return outlet_name, contact_no, media_type, size
 
 
-def convert_pptx_to_pdf(input_pptx_path, output_dir):
-    """LibreOffice se PPTX ko PDF banayein taaki marks render ho saken"""
-    cmd = [
-        "libreoffice",
-        "--headless",
-        "--convert-to",
-        "pdf",
-        input_pptx_path,
-        "--outdir",
-        output_dir,
-    ]
-    subprocess.run(cmd, check=True)
-    pdf_path = os.path.join(
-        output_dir, os.path.splitext(os.path.basename(input_pptx_path))[0] + ".pdf"
-    )
-    return pdf_path
+def process_image_with_marks(slide, img_shape):
+    """Image ke boundaries me moujood kisi bhi shape/mark ko pixel-perfect burn karta hai"""
+    raw_img_bytes = img_shape.image.blob
+    img = Image.open(io.BytesIO(raw_img_bytes)).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    img_left = img_shape.left
+    img_top = img_shape.top
+    img_width = img_shape.width
+    img_height = img_shape.height
+
+    real_w, real_h = img.size
+
+    # Slide par moujood sabhi shapes ko scan karke mark ko find karein
+    for s in slide.shapes:
+        if s == img_shape or s.shape_type == 13:  # Skip background picture itself
+            continue
+
+        # Check agar shape image ke bounding box ke andar hai
+        if (
+            s.left >= (img_left - 50000)
+            and (s.left + s.width) <= (img_left + img_width + 50000)
+            and s.top >= (img_top - 50000)
+            and (s.top + s.height) <= (img_top + img_height + 50000)
+        ):
+
+            # Relative positions (PPT units -> Image pixel scaling)
+            rx1 = (s.left - img_left) / img_width
+            ry1 = (s.top - img_top) / img_height
+            rx2 = (s.left + s.width - img_left) / img_width
+            ry2 = (s.top + s.height - img_top) / img_height
+
+            x1 = max(0, rx1 * real_w)
+            y1 = max(0, ry1 * real_h)
+            x2 = min(real_w, rx2 * real_w)
+            y2 = min(real_h, ry2 * real_h)
+
+            # Mark Color Detection (Default Green Box if not detected)
+            mark_color = (0, 255, 0)
+            try:
+                if hasattr(s, "line") and s.line.color and s.line.color.rgb:
+                    rgb = s.line.color.rgb
+                    mark_color = (rgb[0], rgb[1], rgb[2])
+            except Exception:
+                pass
+
+            stroke = max(4, int(min(real_w, real_h) * 0.012))
+            draw.rectangle([x1, y1, x2, y2], outline=mark_color, width=stroke)
+
+    out = io.BytesIO()
+    img.save(out, format="JPEG", quality=95)
+    return out.getvalue()
 
 
 uploaded_file = st.file_uploader("PowerPoint File Upload Karein (.pptx)", type=["pptx"])
 
 if uploaded_file is not None:
-    temp_pptx = "temp_input.pptx"
-    with open(temp_pptx, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
-    prs = Presentation(temp_pptx)
-    slide_width = prs.slide_width
-    slide_height = prs.slide_height
-
+    prs = Presentation(uploaded_file)
     zip_buffer = io.BytesIO()
 
-    with st.spinner(
-        "Rendering slides & Cropping Marked Images (Visual Overlay Mode)..."
-    ):
-        try:
-            # 1. PPT ko PDF me convert karke visually draw kar rahe hain
-            pdf_path = convert_pptx_to_pdf(temp_pptx, ".")
-            doc = fitz.open(pdf_path)
+    with st.spinner("Processing marked images..."):
+        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+            for i, slide in enumerate(prs.slides):
+                outlet_name, contact_no, media_type, size = (
+                    extract_info_from_slide(slide)
+                )
+                pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
 
-            with zipfile.ZipFile(
-                zip_buffer, "a", zipfile.ZIP_DEFLATED, False
-            ) as zip_file:
-                for i, slide in enumerate(prs.slides):
-                    outlet_name, contact_no, media_type, size = (
-                        extract_info_from_slide(slide)
-                    )
-                    pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
+                if pic_shapes:
+                    leftmost_pic = min(pic_shapes, key=lambda s: s.left)
+                    final_bytes = process_image_with_marks(slide, leftmost_pic)
 
-                    if pic_shapes:
-                        leftmost_pic = min(pic_shapes, key=lambda s: s.left)
+                    if not outlet_name:
+                        outlet_name = f"Slide_{i+1}"
 
-                        # Bounding box ratios calculate karna
-                        rx = leftmost_pic.left / slide_width
-                        ry = leftmost_pic.top / slide_height
-                        rw = leftmost_pic.width / slide_width
-                        rh = leftmost_pic.height / slide_height
+                    components = [clean_text(outlet_name)]
+                    if contact_no:
+                        components.append(clean_text(contact_no))
+                    if media_type:
+                        components.append(clean_text(media_type))
+                    if size:
+                        components.append(clean_text(size))
 
-                        # PDF Page rendering
-                        page = doc.load_page(i)
-                        rect = page.rect
-                        page_w, page_h = rect.width, rect.height
+                    final_name = f"{'_'.join(components)}.jpg"
+                    zip_file.writestr(final_name, final_bytes)
 
-                        # Precise crop area selection
-                        crop_box = fitz.Rect(
-                            rx * page_w,
-                            ry * page_h,
-                            (rx + rw) * page_w,
-                            (ry + rh) * page_h,
-                        )
-
-                        pix = page.get_pixmap(clip=crop_box, dpi=300)
-                        img_bytes = pix.tobytes("jpeg")
-
-                        if not outlet_name:
-                            outlet_name = f"Slide_{i+1}"
-
-                        components = [clean_text(outlet_name)]
-                        if contact_no:
-                            components.append(clean_text(contact_no))
-                        if media_type:
-                            components.append(clean_text(media_type))
-                        if size:
-                            components.append(clean_text(size))
-
-                        final_name = f"{'_'.join(components)}.jpg"
-                        zip_file.writestr(final_name, img_bytes)
-
-            doc.close()
-            if os.path.exists(pdf_path):
-                os.remove(pdf_path)
-
-            st.success("🎉 Marked Images successfully extracted!")
-            st.download_button(
-                label="📥 Download Renamed Images With Box (ZIP)",
-                data=zip_buffer.getvalue(),
-                file_name="Renamed_Marked_Images.zip",
-                mime="application/zip",
-            )
-        except Exception as e:
-            st.error(
-                "PDF Render require LibreOffice or PyMuPDF. Standard fallback executed."
-            )
+    st.success("🎉 Process Complete! Marks included.")
+    st.download_button(
+        label="📥 Download Marked Images (ZIP)",
+        data=zip_buffer.getvalue(),
+        file_name="Renamed_Marked_Images.zip",
+        mime="application/zip",
+    )
