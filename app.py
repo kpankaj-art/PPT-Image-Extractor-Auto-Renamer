@@ -8,13 +8,14 @@ import streamlit as st
 st.set_page_config(
     page_title="PPT Left Image Extractor", page_icon="🖼️", layout="centered"
 )
-st.title("🖼️ PPT Left Image Extractor & Renamer")
+st.title("🖼️ PPT Image Extractor & Auto-Renamer")
 st.write(
-    "PPT upload karein. Har slide se sirf **LEFT SIDE** wali image extract karke rename kar di jayegi."
+    "Format: **OutletName_MobileNo_Type_Size.jpg** (Only Left Image Extracted)"
 )
 
 
 def clean_text(text):
+    """Invalid file name characters hatane ke liye"""
     if not text:
         return ""
     clean = re.sub(r'[\\/*?:"<>|\n\r\t]', " ", text)
@@ -22,26 +23,28 @@ def clean_text(text):
     return clean.replace(" ", "_")
 
 
-def extract_info(slide):
-    all_text = []
+def extract_info_from_slide(slide):
+    """Exact text matching for Outlet Name, Contact, Type, and Size"""
+    full_text = ""
     for shape in slide.shapes:
         if shape.has_text_frame:
-            all_text.append(shape.text_frame.text)
+            full_text += "\n" + shape.text_frame.text
 
-    full_text = " ".join(all_text)
-
-    # 1. Outlet Name
     outlet_name = ""
+    contact_no = ""
+    media_type = ""
+    size = ""
+
+    # 1. Outlet Name: 'Outlet Name:' se lekar agli line/label tak ka exact text
     outlet_match = re.search(
-        r"Outlet\s*Name\s*[:\-]?\s*([^Address|City|Contact|Installation|Type|Size|\n\r]+)",
+        r"Outlet\s*Name\s*[:\-]\s*(.*?)(?=\n|Address|City|Contact|Installation|Type|Size|$)",
         full_text,
         re.IGNORECASE,
     )
     if outlet_match:
         outlet_name = outlet_match.group(1).strip()
 
-    # 2. Contact Number
-    contact_no = ""
+    # 2. Contact No: 10 digit Mobile Number
     contact_match = re.search(
         r"Contact\s*(?:No)?\s*[:\-]?\s*(\d{10})", full_text, re.IGNORECASE
     )
@@ -52,18 +55,16 @@ def extract_info(slide):
         if num_match:
             contact_no = num_match.group(0)
 
-    # 3. Type
-    media_type = ""
+    # 3. Type: 'Type:' ke aage ka text (FL, NL, etc.) - Ignore 'Outlet' word
     type_match = re.search(
-        r"Type\s*[:\-]?\s*([A-Za-z0-9_\-]+)", full_text, re.IGNORECASE
+        r"(?<!Outlet\s)Type\s*[:\-]\s*([A-Za-z0-9_\-]+)", full_text, re.IGNORECASE
     )
     if type_match:
         media_type = type_match.group(1).strip()
 
-    # 4. Size
-    size = ""
+    # 4. Size: 'Size:' ke aage ka text (e.g., 10x4 ya 10 x 4)
     size_match = re.search(
-        r"Size\s*[:\-]?\s*(\d+\s*x\s*\d+)", full_text, re.IGNORECASE
+        r"Size\s*[:\-]\s*(\d+\s*x\s*\d+)", full_text, re.IGNORECASE
     )
     if size_match:
         size = size_match.group(1).replace(" ", "").strip()
@@ -80,35 +81,42 @@ if uploaded_file is not None:
     with st.spinner("Processing slides..."):
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             for i, slide in enumerate(prs.slides):
-                outlet_name, contact_no, media_type, size = extract_info(slide)
+                outlet_name, contact_no, media_type, size = (
+                    extract_info_from_slide(slide)
+                )
 
-                # Collect all picture shapes
+                # Slide ke saare picture shapes
                 pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
 
                 if pic_shapes:
-                    # Sort by X (left) coordinate to get LEFTMOST image
+                    # Horizontal position (left) ke basis par Leftmost Image select karein
                     leftmost_pic = min(pic_shapes, key=lambda s: s.left)
 
+                    # Agar Name na mile toh slide number fallback
                     if not outlet_name:
                         outlet_name = f"Slide_{i+1}"
 
-                    components = [
-                        clean_text(p)
-                        for p in [outlet_name, contact_no, media_type, size]
-                        if p
-                    ]
-                    base_filename = "_".join(components)
+                    # Exact Order: Name -> Number -> Type -> Size
+                    components = []
+                    if outlet_name:
+                        components.append(clean_text(outlet_name))
+                    if contact_no:
+                        components.append(clean_text(contact_no))
+                    if media_type:
+                        components.append(clean_text(media_type))
+                    if size:
+                        components.append(clean_text(size))
 
+                    base_filename = "_".join(components)
                     ext = leftmost_pic.image.ext
                     final_name = f"{base_filename}.{ext}"
 
-                    # Write image blob directly
                     zip_file.writestr(final_name, leftmost_pic.image.blob)
 
-    st.success("🎉 Sabhi Left Images ready hain!")
+    st.success("🎉 Process Complete!")
     st.download_button(
-        label="📥 Download ZIP",
+        label="📥 Download Renamed Images (ZIP)",
         data=zip_buffer.getvalue(),
-        file_name="Renamed_Left_Images.zip",
+        file_name="Renamed_Images.zip",
         mime="application/zip",
     )
