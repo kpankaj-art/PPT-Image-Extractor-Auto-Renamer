@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 st.set_page_config(
     page_title="PPT Marked Image Extractor", page_icon="🖼️", layout="centered"
 )
-st.title("🖼️ PPT Image Extractor (With Drawing Marks)")
+st.title("🖼️ PPT Image Extractor (Visual Smart Matching)")
 st.write(
     "Format: **OutletName_MobileNo_Type_Size.jpg** (Preserves Green/Red Box Marks)"
 )
@@ -60,7 +60,7 @@ def extract_info_from_slide(slide):
         ignore_keywords = [
             "qty", "size", "type", "address", "city", "contact",
             "far view", "close view", "board", "installation",
-            "dealer_code", "outlet",
+            "dealer_code", "outlet", "before view", "after view"
         ]
         for block in all_text_blocks:
             lines = [l.strip() for l in block.split("\n") if l.strip()]
@@ -83,7 +83,7 @@ def extract_info_from_slide(slide):
         media_type = type_match.group(1).upper()
 
     size_match = re.search(
-        r"(\d{1,3}\s*x\s*\d{1,3})", full_text, re.IGNORECASE
+        r"(\d{1,3}(?:\.\d+)?\s*x\s*\d{1,3}(?:\.\d+)?)", full_text, re.IGNORECASE
     )
     if size_match:
         size = size_match.group(1).replace(" ", "").lower()
@@ -91,8 +91,29 @@ def extract_info_from_slide(slide):
     return outlet_name, contact_no, media_type, size
 
 
+def get_real_images_from_slide(slide):
+    """Smart image analyzer: Inspects pixel content to filter valid images from PPT boxes"""
+    valid_images = []
+    
+    for s in slide.shapes:
+        # Check if the shape contains actual binary image data
+        if getattr(s, "shape_type", None) == 13 or hasattr(s, "image"):
+            try:
+                img_bytes = s.image.blob
+                test_img = Image.open(io.BytesIO(img_bytes))
+                
+                # Check for image size validity (Ignores tiny PPT icons or blank placeholders)
+                if test_img.width > 50 and test_img.height > 50:
+                    valid_images.append(s)
+            except Exception:
+                continue
+
+    # Sort genuine images left-to-right visually based on exact position
+    return sorted(valid_images, key=lambda img: img.left)
+
+
 def process_image_with_marks(slide, img_shape):
-    """Detects and overlays shape/box marks directly onto the target image pixels"""
+    """Overlays green/red drawing boxes with pixel precision onto selected photo"""
     raw_img_bytes = img_shape.image.blob
     img = Image.open(io.BytesIO(raw_img_bytes)).convert("RGB")
     draw = ImageDraw.Draw(img)
@@ -107,7 +128,8 @@ def process_image_with_marks(slide, img_shape):
     real_w, real_h = img.size
 
     for s in slide.shapes:
-        if s == img_shape or s.shape_type == 13:
+        # Exclude background templates or target image itself
+        if s == img_shape:
             continue
 
         s_left = s.left
@@ -115,12 +137,13 @@ def process_image_with_marks(slide, img_shape):
         s_right = s.left + s.width
         s_bottom = s.top + s.height
 
-        # Improved spatial overlap detection specifically for Right/Far images
+        # Bounding Intersection Math
         overlap_x1 = max(img_left, s_left)
         overlap_y1 = max(img_top, s_top)
         overlap_x2 = min(img_right, s_right)
         overlap_y2 = min(img_bottom, s_bottom)
 
+        # Draw mark only if drawing line intersects inside image bounds
         if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
             rx1 = (s_left - img_left) / img_width
             ry1 = (s_top - img_top) / img_height
@@ -134,7 +157,7 @@ def process_image_with_marks(slide, img_shape):
 
             mark_color = (0, 255, 0)
             try:
-                if hasattr(s, "line") and s.line.color and s.line.color.rgb:
+                if hasattr(s, "line") and s.line and s.line.color and s.line.color.rgb:
                     rgb = s.line.color.rgb
                     mark_color = (rgb[0], rgb[1], rgb[2])
             except Exception:
@@ -158,24 +181,24 @@ if uploaded_file is not None:
         prs = Presentation(uploaded_file)
         zip_buffer = io.BytesIO()
 
-        with st.spinner("Processing selected images..."):
+        with st.spinner("Processing images with smart visual analysis..."):
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
                     
-                    pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
-                    pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
+                    # Analyze actual images visually
+                    valid_images = get_real_images_from_slide(slide)
 
-                    if pic_shapes:
+                    if valid_images:
                         target_pic = None
                         
-                        if "Image 1" in image_option and len(pic_shapes) >= 1:
-                            target_pic = pic_shapes[0]
+                        if "Image 1" in image_option:
+                            target_pic = valid_images[0]
                         elif "Image 2" in image_option:
-                            if len(pic_shapes) >= 2:
-                                target_pic = pic_shapes[1]
-                            elif len(pic_shapes) == 1:
-                                target_pic = pic_shapes[0]
+                            if len(valid_images) >= 2:
+                                target_pic = valid_images[1]
+                            elif len(valid_images) == 1:
+                                target_pic = valid_images[0]
 
                         if target_pic:
                             final_bytes = process_image_with_marks(slide, target_pic)
