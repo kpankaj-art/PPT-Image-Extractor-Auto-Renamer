@@ -107,11 +107,10 @@ def get_real_images_from_slide(slide):
 
 
 def process_image_with_marks(slide, img_shape):
-    """Accurately calculates spatial cropping & overlays markings precisely on source pixel map"""
+    """Overlays ONLY actual inner drawing annotations on the selected image"""
     raw_img_bytes = img_shape.image.blob
     img = Image.open(io.BytesIO(raw_img_bytes)).convert("RGB")
 
-    # Fetch crop properties applied in PPT
     crop_l = getattr(img_shape, "crop_left", 0) or 0
     crop_r = getattr(img_shape, "crop_right", 0) or 0
     crop_t = getattr(img_shape, "crop_top", 0) or 0
@@ -119,7 +118,6 @@ def process_image_with_marks(slide, img_shape):
 
     real_w, real_h = img.size
 
-    # Apply Crop on raw pixel bitmap if cropped in slide
     if crop_l > 0 or crop_r > 0 or crop_t > 0 or crop_b > 0:
         left_px = int(crop_l * real_w)
         top_px = int(crop_t * real_h)
@@ -140,8 +138,8 @@ def process_image_with_marks(slide, img_shape):
     img_bottom = img_top + img_height
 
     for s in slide.shapes:
-        # Ignore target picture and other full-slide pictures
-        if s == img_shape or getattr(s, "shape_type", None) == 13:
+        # Ignore picture shapes, text frames, or non-drawing objects
+        if s == img_shape or getattr(s, "shape_type", None) == 13 or s.has_text_frame:
             continue
 
         s_left = s.left
@@ -149,14 +147,15 @@ def process_image_with_marks(slide, img_shape):
         s_right = s.left + s.width
         s_bottom = s.top + s.height
 
-        # Spatial bounding intersection check
-        overlap_x1 = max(img_left, s_left)
-        overlap_y1 = max(img_top, s_top)
-        overlap_x2 = min(img_right, s_right)
-        overlap_y2 = min(img_bottom, s_bottom)
+        # Strict Filter: Ignore outer slide frames or boxes almost as large as the image itself
+        if (s_width := s.width) >= (img_width * 0.85) or (s_height := s.height) >= (img_height * 0.85):
+            continue
 
-        if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
-            # Scale coordinates accurately relative to actual slide object size
+        # Check if the shape center strictly lies inside the image canvas
+        s_center_x = s_left + (s_width / 2)
+        s_center_y = s_top + (s_height / 2)
+
+        if img_left <= s_center_x <= img_right and img_top <= s_center_y <= img_bottom:
             rx1 = (s_left - img_left) / img_width
             ry1 = (s_top - img_top) / img_height
             rx2 = (s_right - img_left) / img_width
@@ -193,7 +192,7 @@ if uploaded_file is not None:
         prs = Presentation(uploaded_file)
         zip_buffer = io.BytesIO()
 
-        with st.spinner("Processing cropped and transformed images..."):
+        with st.spinner("Extracting image markings cleanly..."):
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
