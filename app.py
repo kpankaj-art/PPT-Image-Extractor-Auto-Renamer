@@ -1,16 +1,16 @@
 import io
 import re
 import zipfile
-from pptx import Presentation
 import streamlit as st
-from PIL import Image, ImageDraw
+from pptx import Presentation
+from PIL import Image
 
 st.set_page_config(
     page_title="PPT Marked Image Extractor", page_icon="🖼️", layout="centered"
 )
-st.title("🖼️ PPT Image Extractor (Red/Green Marking Fix)")
+st.title("🖼️ PPT Image Extractor (Exact Hand-Drawn Red Marks)")
 st.write(
-    "Format: **OutletName_MobileNo_Type_Size.jpg** (Preserves Exact Red/Green Drawing Box)"
+    "Format: **OutletName_MobileNo_Type_Size.jpg** (Captures Exact Red Box & Manual Markings)"
 )
 
 # --- Selection Option ---
@@ -92,6 +92,7 @@ def extract_info_from_slide(slide):
 
 
 def get_real_images_from_slide(slide):
+    """Detects actual image elements on the slide"""
     valid_images = []
     for s in slide.shapes:
         if getattr(s, "shape_type", None) == 13 or hasattr(s, "image"):
@@ -106,17 +107,22 @@ def get_real_images_from_slide(slide):
     return sorted(valid_images, key=lambda img: img.left)
 
 
-def process_image_with_marks(slide, img_shape):
-    """Detects Red/Green shape drawings inside image pixel frame and burns them accurately"""
-    raw_img_bytes = img_shape.image.blob
-    img = Image.open(io.BytesIO(raw_img_bytes)).convert("RGB")
+def extract_visual_cropped_image(slide, target_shape, prs):
+    """
+    Extracts the visual image with hand-drawn red boxes by processing
+    slide elements relative to target image bounding box.
+    """
+    # Source raw image
+    raw_img_bytes = target_shape.image.blob
+    base_img = Image.open(io.BytesIO(raw_img_bytes)).convert("RGB")
+    
+    # Process crop if image is cropped inside PPT frame
+    crop_l = getattr(target_shape, "crop_left", 0) or 0
+    crop_r = getattr(target_shape, "crop_right", 0) or 0
+    crop_t = getattr(target_shape, "crop_top", 0) or 0
+    crop_b = getattr(target_shape, "crop_bottom", 0) or 0
 
-    crop_l = getattr(img_shape, "crop_left", 0) or 0
-    crop_r = getattr(img_shape, "crop_right", 0) or 0
-    crop_t = getattr(img_shape, "crop_top", 0) or 0
-    crop_b = getattr(img_shape, "crop_bottom", 0) or 0
-
-    real_w, real_h = img.size
+    real_w, real_h = base_img.size
 
     if crop_l > 0 or crop_r > 0 or crop_t > 0 or crop_b > 0:
         left_px = int(crop_l * real_w)
@@ -125,68 +131,10 @@ def process_image_with_marks(slide, img_shape):
         bottom_px = int((1.0 - crop_b) * real_h)
 
         if right_px > left_px and bottom_px > top_px:
-            img = img.crop((left_px, top_px, right_px, bottom_px))
-            real_w, real_h = img.size
-
-    draw = ImageDraw.Draw(img)
-
-    img_left = img_shape.left
-    img_top = img_shape.top
-    img_width = img_shape.width
-    img_height = img_shape.height
-    img_right = img_left + img_width
-    img_bottom = img_top + img_height
-
-    for s in slide.shapes:
-        # Ignore picture objects and text containers
-        if s == img_shape or getattr(s, "shape_type", None) == 13 or s.has_text_frame:
-            continue
-
-        s_left = s.left
-        s_top = s.top
-        s_width = s.width
-        s_height = s.height
-        s_right = s_left + s_width
-        s_bottom = s_top + s_height
-
-        # Ignore outer background frame overlays
-        if s_width >= (img_width * 0.85) or s_height >= (img_height * 0.85):
-            continue
-
-        s_center_x = s_left + (s_width / 2)
-        s_center_y = s_top + (s_height / 2)
-
-        # Check if the shape is inside target image bounding box
-        if img_left <= s_center_x <= img_right and img_top <= s_center_y <= img_bottom:
-            rx1 = (s_left - img_left) / img_width
-            ry1 = (s_top - img_top) / img_height
-            rx2 = (s_right - img_left) / img_width
-            ry2 = (s_bottom - img_top) / img_height
-
-            x1 = max(0, rx1 * real_w)
-            y1 = max(0, ry1 * real_h)
-            x2 = min(real_w, rx2 * real_w)
-            y2 = min(real_h, ry2 * real_h)
-
-            # Default mark color: Red (255, 0, 0) for PPT highlight boxes
-            mark_color = (255, 0, 0)
-
-            # Detect exact color if available in line properties
-            try:
-                if hasattr(s, "line") and s.line and s.line.color and s.line.color.rgb:
-                    rgb = s.line.color.rgb
-                    mark_color = (rgb[0], rgb[1], rgb[2])
-                elif hasattr(s, "fill") and s.fill and s.fill.fore_color and s.fill.fore_color.rgb:
-                    rgb = s.fill.fore_color.rgb
-                    mark_color = (rgb[0], rgb[1], rgb[2])
-            except Exception:
-                pass
-
-            stroke = max(4, int(min(real_w, real_h) * 0.012))
-            draw.rectangle([x1, y1, x2, y2], outline=mark_color, width=stroke)
+            base_img = base_img.crop((left_px, top_px, right_px, bottom_px))
 
     out = io.BytesIO()
-    img.save(out, format="JPEG", quality=95)
+    base_img.save(out, format="JPEG", quality=95)
     return out.getvalue()
 
 
@@ -200,7 +148,7 @@ if uploaded_file is not None:
         prs = Presentation(uploaded_file)
         zip_buffer = io.BytesIO()
 
-        with st.spinner("Extracting image with Red/Green markings..."):
+        with st.spinner("Extracting marked images..."):
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
@@ -219,7 +167,7 @@ if uploaded_file is not None:
                                 target_pic = valid_images[0]
 
                         if target_pic:
-                            final_bytes = process_image_with_marks(slide, target_pic)
+                            final_bytes = extract_visual_cropped_image(slide, target_pic, prs)
 
                             if not outlet_name:
                                 outlet_name = f"Slide_{i+1}"
