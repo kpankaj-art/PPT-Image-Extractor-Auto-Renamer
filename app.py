@@ -2,20 +2,14 @@ import io
 import os
 import re
 import zipfile
+import subprocess
 from pptx import Presentation
 import streamlit as st
 from PIL import Image
-
-# Slide render support for Windows / Local Environment
-try:
-    from pdf2image import convert_from_bytes
-    import comtypes.client
-    PDF_RENDER_AVAILABLE = True
-except Exception:
-    PDF_RENDER_AVAILABLE = False
+from pdf2image import convert_from_path
 
 st.set_page_config(
-    page_title="PPT Marked Image Extractor", page_icon="🖼️", layout="centered"
+    page_title="PPT Visual Image Extractor", page_icon="🖼️", layout="centered"
 )
 st.title("🖼️ PPT Visual Image Extractor")
 
@@ -25,14 +19,12 @@ image_option = st.radio(
     index=1
 )
 
-
 def clean_text(text):
     if not text:
         return ""
     clean = re.sub(r'[\\/*?:"<>|\n\r\t]', " ", text)
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean.replace(" ", "_")
-
 
 def extract_info_from_slide(slide):
     all_text_blocks = []
@@ -79,79 +71,61 @@ def extract_info_from_slide(slide):
 
     return outlet_name, contact_no, media_type, size
 
-
 def crop_image_visually_from_slide(slide, target_shape, slide_image, prs):
-    """Crops the exact visual screen area of the image including Red Box Overlay"""
-    # PPT Dimensions
     slide_width = prs.slide_width
     slide_height = prs.slide_height
 
-    # Image coordinates on slide
     left = target_shape.left
     top = target_shape.top
     width = target_shape.width
     height = target_shape.height
 
-    # Screen dimensions of rendered slide image
     img_w, img_h = slide_image.size
 
-    # Relative pixel coordinates calculation
     x1 = int((left / slide_width) * img_w)
     y1 = int((top / slide_height) * img_h)
     x2 = int(((left + width) / slide_width) * img_w)
     y2 = int(((top + height) / slide_height) * img_h)
 
-    # Crop visual portion containing Red Box Marking
     cropped = slide_image.crop((x1, y1, x2, y2))
     
     out = io.BytesIO()
     cropped.save(out, format="JPEG", quality=95)
     return out.getvalue()
 
-
 uploaded_file = st.file_uploader("Upload PowerPoint File (.pptx)", type=["pptx"])
 
 if uploaded_file is not None:
     if st.button("▶️ Start Visual Extraction", type="primary", use_container_width=True):
-        # Save temporary PPTX
         with open("temp_input.pptx", "wb") as f:
             f.write(uploaded_file.getbuffer())
 
         prs = Presentation("temp_input.pptx")
         zip_buffer = io.BytesIO()
 
-        # Render slides to PDF/Images to capture red marking overlays
-        rendered_images = []
-        try:
-            # Conversion step for Windows Local Streamlit app
-            powerpoint = comtypes.client.CreateObject("PowerPoint.Application")
-            powerpoint.Visible = 1
-            abs_path = os.path.abspath("temp_input.pptx")
-            pdf_path = os.path.abspath("temp_output.pdf")
-            
-            deck = powerpoint.Presentations.Open(abs_path)
-            deck.SaveAs(pdf_path, 32) # 32 = ppSaveAsPDF
-            deck.Close()
-            powerpoint.Quit()
-
-            with open(pdf_path, "rb") as pdf_file:
-                rendered_images = convert_from_bytes(pdf_file.read(), dpi=200)
-        except Exception as e:
-            st.error("PowerPoint Rendering Engine Error. Visual crop requires local Microsoft PowerPoint.")
+        with st.spinner("Converting PPT slides to capture red markings..."):
+            try:
+                # Convert PPTX to PDF via LibreOffice (Linux Server Supported)
+                subprocess.run(
+                    ["libreoffice", "--headless", "--convert-to", "pdf", "temp_input.pptx"],
+                    check=True
+                )
+                rendered_images = convert_from_path("temp_input.pdf", dpi=200)
+            except Exception as e:
+                st.error(f"Rendering error: {e}")
+                rendered_images = []
 
         if rendered_images:
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
                     
-                    # Find picture shapes
                     pic_shapes = [s for s in slide.shapes if getattr(s, "shape_type", None) == 13 or hasattr(s, "image")]
                     pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
                     if pic_shapes and i < len(rendered_images):
                         target_pic = pic_shapes[-1] if "Image 2" in image_option else pic_shapes[0]
                         
-                        # Visual Crop
                         final_bytes = crop_image_visually_from_slide(
                             slide, target_pic, rendered_images[i], prs
                         )
