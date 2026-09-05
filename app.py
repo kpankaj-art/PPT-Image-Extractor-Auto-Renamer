@@ -13,6 +13,12 @@ st.write(
     "Format: **OutletName_MobileNo_Type_Size.jpg** (Preserves Green/Red Box Marks)"
 )
 
+# --- Selection Option ---
+image_option = st.radio(
+    "Konsi Image Export Karni Hai Select Karein:",
+    ("Image 1 (Left / Close View)", "Image 2 (Right / Far View)", "Both Images (Image 1 & Image 2)"),
+    index=0
+)
 
 def clean_text(text):
     if not text:
@@ -51,18 +57,9 @@ def extract_info_from_slide(slide):
 
     if not outlet_name:
         ignore_keywords = [
-            "qty",
-            "size",
-            "type",
-            "address",
-            "city",
-            "contact",
-            "far view",
-            "close view",
-            "board",
-            "installation",
-            "dealer_code",
-            "outlet",
+            "qty", "size", "type", "address", "city", "contact",
+            "far view", "close view", "board", "installation",
+            "dealer_code", "outlet",
         ]
         for block in all_text_blocks:
             lines = [l.strip() for l in block.split("\n") if l.strip()]
@@ -106,20 +103,16 @@ def process_image_with_marks(slide, img_shape):
 
     real_w, real_h = img.size
 
-    # Slide par moujood sabhi shapes ko scan karke mark ko find karein
     for s in slide.shapes:
-        if s == img_shape or s.shape_type == 13:  # Skip background picture itself
+        if s == img_shape or s.shape_type == 13:
             continue
 
-        # Check agar shape image ke bounding box ke andar hai
         if (
             s.left >= (img_left - 50000)
             and (s.left + s.width) <= (img_left + img_width + 50000)
             and s.top >= (img_top - 50000)
             and (s.top + s.height) <= (img_top + img_height + 50000)
         ):
-
-            # Relative positions (PPT units -> Image pixel scaling)
             rx1 = (s.left - img_left) / img_width
             ry1 = (s.top - img_top) / img_height
             rx2 = (s.left + s.width - img_left) / img_width
@@ -130,7 +123,6 @@ def process_image_with_marks(slide, img_shape):
             x2 = min(real_w, rx2 * real_w)
             y2 = min(real_h, ry2 * real_h)
 
-            # Mark Color Detection (Default Green Box if not detected)
             mark_color = (0, 255, 0)
             try:
                 if hasattr(s, "line") and s.line.color and s.line.color.rgb:
@@ -153,36 +145,53 @@ if uploaded_file is not None:
     prs = Presentation(uploaded_file)
     zip_buffer = io.BytesIO()
 
-    with st.spinner("Processing marked images..."):
+    with st.spinner("Processing selected images..."):
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             for i, slide in enumerate(prs.slides):
-                outlet_name, contact_no, media_type, size = (
-                    extract_info_from_slide(slide)
-                )
+                outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
+                
+                # Sabhi images ko unki X-position (Left) ke hisaab se sort karenge
                 pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
+                pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
                 if pic_shapes:
-                    leftmost_pic = min(pic_shapes, key=lambda s: s.left)
-                    final_bytes = process_image_with_marks(slide, leftmost_pic)
+                    selected_pics = []
+                    
+                    # User ki choice ke according filter
+                    if "Image 1" in image_option and len(pic_shapes) >= 1:
+                        selected_pics.append((pic_shapes[0], "img1"))
+                    elif "Image 2" in image_option and len(pic_shapes) >= 2:
+                        selected_pics.append((pic_shapes[1], "img2"))
+                    elif "Both" in image_option:
+                        for idx, pic in enumerate(pic_shapes):
+                            selected_pics.append((pic, f"img{idx+1}"))
 
-                    if not outlet_name:
-                        outlet_name = f"Slide_{i+1}"
+                    for pic, suffix in selected_pics:
+                        final_bytes = process_image_with_marks(slide, pic)
 
-                    components = [clean_text(outlet_name)]
-                    if contact_no:
-                        components.append(clean_text(contact_no))
-                    if media_type:
-                        components.append(clean_text(media_type))
-                    if size:
-                        components.append(clean_text(size))
+                        if not outlet_name:
+                            outlet_name = f"Slide_{i+1}"
 
-                    final_name = f"{'_'.join(components)}.jpg"
-                    zip_file.writestr(final_name, final_bytes)
+                        components = [clean_text(outlet_name)]
+                        if contact_no:
+                            components.append(clean_text(contact_no))
+                        if media_type:
+                            components.append(clean_text(media_type))
+                        if size:
+                            components.append(clean_text(size))
 
-    st.success("🎉 Process Complete! Marks included.")
+                        # Agar Both Images select kiya hai toh filename ke aage suffix lagega
+                        if "Both" in image_option:
+                            final_name = f"{'_'.join(components)}_{suffix}.jpg"
+                        else:
+                            final_name = f"{'_'.join(components)}.jpg"
+
+                        zip_file.writestr(final_name, final_bytes)
+
+    st.success("🎉 Process Complete!")
     st.download_button(
-        label="📥 Download Marked Images (ZIP)",
+        label="📥 Download Selected Images (ZIP)",
         data=zip_buffer.getvalue(),
-        file_name="Renamed_Marked_Images.zip",
+        file_name="Renamed_Images.zip",
         mime="application/zip",
     )
