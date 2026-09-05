@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw
 st.set_page_config(
     page_title="PPT Marked Image Extractor", page_icon="🖼️", layout="centered"
 )
-st.title("🖼️ PPT Image Extractor (Visual Smart Matching)")
+st.title("🖼️ PPT Image Extractor (With Drawing Marks)")
 st.write(
     "Format: **OutletName_MobileNo_Type_Size.jpg** (Preserves Green/Red Box Marks)"
 )
@@ -92,30 +92,44 @@ def extract_info_from_slide(slide):
 
 
 def get_real_images_from_slide(slide):
-    """Smart image analyzer: Inspects pixel content to filter valid images from PPT boxes"""
     valid_images = []
-    
     for s in slide.shapes:
-        # Check if the shape contains actual binary image data
         if getattr(s, "shape_type", None) == 13 or hasattr(s, "image"):
             try:
                 img_bytes = s.image.blob
                 test_img = Image.open(io.BytesIO(img_bytes))
-                
-                # Check for image size validity (Ignores tiny PPT icons or blank placeholders)
                 if test_img.width > 50 and test_img.height > 50:
                     valid_images.append(s)
             except Exception:
                 continue
 
-    # Sort genuine images left-to-right visually based on exact position
     return sorted(valid_images, key=lambda img: img.left)
 
 
 def process_image_with_marks(slide, img_shape):
-    """Overlays green/red drawing boxes with pixel precision onto selected photo"""
+    """Accurately calculates spatial cropping & overlays markings precisely on source pixel map"""
     raw_img_bytes = img_shape.image.blob
     img = Image.open(io.BytesIO(raw_img_bytes)).convert("RGB")
+
+    # Fetch crop properties applied in PPT
+    crop_l = getattr(img_shape, "crop_left", 0) or 0
+    crop_r = getattr(img_shape, "crop_right", 0) or 0
+    crop_t = getattr(img_shape, "crop_top", 0) or 0
+    crop_b = getattr(img_shape, "crop_bottom", 0) or 0
+
+    real_w, real_h = img.size
+
+    # Apply Crop on raw pixel bitmap if cropped in slide
+    if crop_l > 0 or crop_r > 0 or crop_t > 0 or crop_b > 0:
+        left_px = int(crop_l * real_w)
+        top_px = int(crop_t * real_h)
+        right_px = int((1.0 - crop_r) * real_w)
+        bottom_px = int((1.0 - crop_b) * real_h)
+
+        if right_px > left_px and bottom_px > top_px:
+            img = img.crop((left_px, top_px, right_px, bottom_px))
+            real_w, real_h = img.size
+
     draw = ImageDraw.Draw(img)
 
     img_left = img_shape.left
@@ -125,11 +139,9 @@ def process_image_with_marks(slide, img_shape):
     img_right = img_left + img_width
     img_bottom = img_top + img_height
 
-    real_w, real_h = img.size
-
     for s in slide.shapes:
-        # Exclude background templates or target image itself
-        if s == img_shape:
+        # Ignore target picture and other full-slide pictures
+        if s == img_shape or getattr(s, "shape_type", None) == 13:
             continue
 
         s_left = s.left
@@ -137,14 +149,14 @@ def process_image_with_marks(slide, img_shape):
         s_right = s.left + s.width
         s_bottom = s.top + s.height
 
-        # Bounding Intersection Math
+        # Spatial bounding intersection check
         overlap_x1 = max(img_left, s_left)
         overlap_y1 = max(img_top, s_top)
         overlap_x2 = min(img_right, s_right)
         overlap_y2 = min(img_bottom, s_bottom)
 
-        # Draw mark only if drawing line intersects inside image bounds
         if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
+            # Scale coordinates accurately relative to actual slide object size
             rx1 = (s_left - img_left) / img_width
             ry1 = (s_top - img_top) / img_height
             rx2 = (s_right - img_left) / img_width
@@ -181,12 +193,11 @@ if uploaded_file is not None:
         prs = Presentation(uploaded_file)
         zip_buffer = io.BytesIO()
 
-        with st.spinner("Processing images with smart visual analysis..."):
+        with st.spinner("Processing cropped and transformed images..."):
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
                     
-                    # Analyze actual images visually
                     valid_images = get_real_images_from_slide(slide)
 
                     if valid_images:
