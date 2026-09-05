@@ -15,10 +15,11 @@ st.write(
 
 # --- Selection Option ---
 image_option = st.radio(
-    "Konsi Image Export Karni Hai Select Karein:",
+    "Select Image to Export:",
     ("Image 1 (Left / Close View)", "Image 2 (Right / Far View)", "Both Images (Image 1 & Image 2)"),
     index=0
 )
+
 
 def clean_text(text):
     if not text:
@@ -91,7 +92,7 @@ def extract_info_from_slide(slide):
 
 
 def process_image_with_marks(slide, img_shape):
-    """Image ke boundaries me moujood kisi bhi shape/mark ko pixel-perfect burn karta hai"""
+    """Detects and overlays shape/box marks directly onto the image pixels"""
     raw_img_bytes = img_shape.image.blob
     img = Image.open(io.BytesIO(raw_img_bytes)).convert("RGB")
     draw = ImageDraw.Draw(img)
@@ -139,59 +140,59 @@ def process_image_with_marks(slide, img_shape):
     return out.getvalue()
 
 
-uploaded_file = st.file_uploader("PowerPoint File Upload Karein (.pptx)", type=["pptx"])
+uploaded_file = st.file_uploader("Upload PowerPoint File (.pptx)", type=["pptx"])
 
 if uploaded_file is not None:
-    prs = Presentation(uploaded_file)
-    zip_buffer = io.BytesIO()
+    st.info(f"📁 **Uploaded File:** {uploaded_file.name} ({round(uploaded_file.size / (1024 * 1024), 2)} MB)")
+    
+    if st.button("▶️ Start Extraction", type="primary", use_container_width=True):
+        prs = Presentation(uploaded_file)
+        zip_buffer = io.BytesIO()
 
-    with st.spinner("Processing selected images..."):
-        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-            for i, slide in enumerate(prs.slides):
-                outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
-                
-                # Sabhi images ko unki X-position (Left) ke hisaab se sort karenge
-                pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
-                pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
-
-                if pic_shapes:
-                    selected_pics = []
+        with st.spinner("Processing selected images..."):
+            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                for i, slide in enumerate(prs.slides):
+                    outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
                     
-                    # User ki choice ke according filter
-                    if "Image 1" in image_option and len(pic_shapes) >= 1:
-                        selected_pics.append((pic_shapes[0], "img1"))
-                    elif "Image 2" in image_option and len(pic_shapes) >= 2:
-                        selected_pics.append((pic_shapes[1], "img2"))
-                    elif "Both" in image_option:
-                        for idx, pic in enumerate(pic_shapes):
-                            selected_pics.append((pic, f"img{idx+1}"))
+                    pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
+                    pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
-                    for pic, suffix in selected_pics:
-                        final_bytes = process_image_with_marks(slide, pic)
+                    if pic_shapes:
+                        selected_pics = []
+                        
+                        if "Image 1" in image_option and len(pic_shapes) >= 1:
+                            selected_pics.append((pic_shapes[0], "img1"))
+                        elif "Image 2" in image_option and len(pic_shapes) >= 2:
+                            selected_pics.append((pic_shapes[1], "img2"))
+                        elif "Both" in image_option:
+                            for idx, pic in enumerate(pic_shapes):
+                                selected_pics.append((pic, f"img{idx+1}"))
 
-                        if not outlet_name:
-                            outlet_name = f"Slide_{i+1}"
+                        for pic, suffix in selected_pics:
+                            final_bytes = process_image_with_marks(slide, pic)
 
-                        components = [clean_text(outlet_name)]
-                        if contact_no:
-                            components.append(clean_text(contact_no))
-                        if media_type:
-                            components.append(clean_text(media_type))
-                        if size:
-                            components.append(clean_text(size))
+                            if not outlet_name:
+                                outlet_name = f"Slide_{i+1}"
 
-                        # Agar Both Images select kiya hai toh filename ke aage suffix lagega
-                        if "Both" in image_option:
-                            final_name = f"{'_'.join(components)}_{suffix}.jpg"
-                        else:
-                            final_name = f"{'_'.join(components)}.jpg"
+                            components = [clean_text(outlet_name)]
+                            if contact_no:
+                                components.append(clean_text(contact_no))
+                            if media_type:
+                                components.append(clean_text(media_type))
+                            if size:
+                                components.append(clean_text(size))
 
-                        zip_file.writestr(final_name, final_bytes)
+                            if "Both" in image_option:
+                                final_name = f"{'_'.join(components)}_{suffix}.jpg"
+                            else:
+                                final_name = f"{'_'.join(components)}.jpg"
 
-    st.success("🎉 Process Complete!")
-    st.download_button(
-        label="📥 Download Selected Images (ZIP)",
-        data=zip_buffer.getvalue(),
-        file_name="Renamed_Images.zip",
-        mime="application/zip",
-    )
+                            zip_file.writestr(final_name, final_bytes)
+
+        st.success("🎉 Process Complete!")
+        st.download_button(
+            label="📥 Download Selected Images (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="Renamed_Images.zip",
+            mime="application/zip",
+        )
