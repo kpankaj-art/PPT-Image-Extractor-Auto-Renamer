@@ -92,7 +92,7 @@ def extract_info_from_slide(slide):
 
 
 def process_image_with_marks(slide, img_shape):
-    """Detects and overlays shape/box marks directly onto the image pixels"""
+    """Detects and overlays shape/box marks directly onto the target image pixels"""
     raw_img_bytes = img_shape.image.blob
     img = Image.open(io.BytesIO(raw_img_bytes)).convert("RGB")
     draw = ImageDraw.Draw(img)
@@ -101,6 +101,8 @@ def process_image_with_marks(slide, img_shape):
     img_top = img_shape.top
     img_width = img_shape.width
     img_height = img_shape.height
+    img_right = img_left + img_width
+    img_bottom = img_top + img_height
 
     real_w, real_h = img.size
 
@@ -108,16 +110,22 @@ def process_image_with_marks(slide, img_shape):
         if s == img_shape or s.shape_type == 13:
             continue
 
-        if (
-            s.left >= (img_left - 50000)
-            and (s.left + s.width) <= (img_left + img_width + 50000)
-            and s.top >= (img_top - 50000)
-            and (s.top + s.height) <= (img_top + img_height + 50000)
-        ):
-            rx1 = (s.left - img_left) / img_width
-            ry1 = (s.top - img_top) / img_height
-            rx2 = (s.left + s.width - img_left) / img_width
-            ry2 = (s.top + s.height - img_top) / img_height
+        s_left = s.left
+        s_top = s.top
+        s_right = s.left + s.width
+        s_bottom = s.top + s.height
+
+        # Improved spatial overlap detection specifically for Right/Far images
+        overlap_x1 = max(img_left, s_left)
+        overlap_y1 = max(img_top, s_top)
+        overlap_x2 = min(img_right, s_right)
+        overlap_y2 = min(img_bottom, s_bottom)
+
+        if overlap_x1 < overlap_x2 and overlap_y1 < overlap_y2:
+            rx1 = (s_left - img_left) / img_width
+            ry1 = (s_top - img_top) / img_height
+            rx2 = (s_right - img_left) / img_width
+            ry2 = (s_bottom - img_top) / img_height
 
             x1 = max(0, rx1 * real_w)
             y1 = max(0, ry1 * real_h)
@@ -145,6 +153,7 @@ uploaded_file = st.file_uploader("Upload PowerPoint File (.pptx)", type=["pptx"]
 if uploaded_file is not None:
     st.info(f"📁 **Uploaded File:** {uploaded_file.name} ({round(uploaded_file.size / (1024 * 1024), 2)} MB)")
     
+    # --- START BUTTON ---
     if st.button("▶️ Start Extraction", type="primary", use_container_width=True):
         prs = Presentation(uploaded_file)
         zip_buffer = io.BytesIO()
@@ -162,8 +171,11 @@ if uploaded_file is not None:
                         
                         if "Image 1" in image_option and len(pic_shapes) >= 1:
                             target_pic = pic_shapes[0]
-                        elif "Image 2" in image_option and len(pic_shapes) >= 2:
-                            target_pic = pic_shapes[1]
+                        elif "Image 2" in image_option:
+                            if len(pic_shapes) >= 2:
+                                target_pic = pic_shapes[1]
+                            elif len(pic_shapes) == 1:
+                                target_pic = pic_shapes[0]
 
                         if target_pic:
                             final_bytes = process_image_with_marks(slide, target_pic)
