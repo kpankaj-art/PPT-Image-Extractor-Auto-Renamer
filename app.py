@@ -16,7 +16,7 @@ st.write(
 # --- Selection Option ---
 image_option = st.radio(
     "Select Image to Export:",
-    ("Image 1 (Left / Close View)", "Image 2 (Right / Far View)", "Both Images (Image 1 & Image 2)"),
+    ("Image 1 (Left / Close View)", "Image 2 (Right / Far View)"),
     index=0
 )
 
@@ -158,18 +158,15 @@ if uploaded_file is not None:
                     pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
                     if pic_shapes:
-                        selected_pics = []
+                        target_pic = None
                         
                         if "Image 1" in image_option and len(pic_shapes) >= 1:
-                            selected_pics.append((pic_shapes[0], "img1"))
+                            target_pic = pic_shapes[0]
                         elif "Image 2" in image_option and len(pic_shapes) >= 2:
-                            selected_pics.append((pic_shapes[1], "img2"))
-                        elif "Both" in image_option:
-                            for idx, pic in enumerate(pic_shapes):
-                                selected_pics.append((pic, f"img{idx+1}"))
+                            target_pic = pic_shapes[1]
 
-                        for pic, suffix in selected_pics:
-                            final_bytes = process_image_with_marks(slide, pic)
+                        if target_pic:
+                            final_bytes = process_image_with_marks(slide, target_pic)
 
                             if not outlet_name:
                                 outlet_name = f"Slide_{i+1}"
@@ -182,11 +179,7 @@ if uploaded_file is not None:
                             if size:
                                 components.append(clean_text(size))
 
-                            if "Both" in image_option:
-                                final_name = f"{'_'.join(components)}_{suffix}.jpg"
-                            else:
-                                final_name = f"{'_'.join(components)}.jpg"
-
+                            final_name = f"{'_'.join(components)}.jpg"
                             zip_file.writestr(final_name, final_bytes)
 
         st.success("🎉 Process Complete!")
