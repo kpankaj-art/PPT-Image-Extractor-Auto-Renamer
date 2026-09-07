@@ -1,17 +1,15 @@
 import io
-import os
 import re
 import zipfile
-import subprocess
 from pptx import Presentation
 import streamlit as st
-from PIL import Image
-from pdf2image import convert_from_path
+from PIL import Image, ImageDraw
 
 st.set_page_config(
     page_title="PPT Visual Image Extractor", page_icon="🖼️", layout="centered"
 )
 st.title("🖼️ PPT Visual Image Extractor")
+st.write("Extracts images with **Red Box Overlay / Markings** rendered directly on them!")
 
 image_option = st.radio(
     "Select Image to Export:",
@@ -19,12 +17,14 @@ image_option = st.radio(
     index=1
 )
 
+
 def clean_text(text):
     if not text:
         return ""
     clean = re.sub(r'[\\/*?:"<>|\n\r\t]', " ", text)
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean.replace(" ", "_")
+
 
 def extract_info_from_slide(slide):
     all_text_blocks = []
@@ -71,64 +71,89 @@ def extract_info_from_slide(slide):
 
     return outlet_name, contact_no, media_type, size
 
-def crop_image_visually_from_slide(slide, target_shape, slide_image, prs):
-    slide_width = prs.slide_width
-    slide_height = prs.slide_height
 
-    left = target_shape.left
-    top = target_shape.top
-    width = target_shape.width
-    height = target_shape.height
+def get_red_shapes_over_target(slide, target_pic):
+    """Finds all red box shapes overlaid on the target image"""
+    pic_left = target_pic.left
+    pic_top = target_pic.top
+    pic_right = target_pic.left + target_pic.width
+    pic_bottom = target_pic.top + target_pic.height
 
-    img_w, img_h = slide_image.size
+    overlays = []
+    for shape in slide.shapes:
+        if shape == target_pic:
+            continue
 
-    x1 = int((left / slide_width) * img_w)
-    y1 = int((top / slide_height) * img_h)
-    x2 = int(((left + width) / slide_width) * img_w)
-    y2 = int(((top + height) / slide_height) * img_h)
+        # Check if shape overlaps with target image bounding box
+        s_left, s_top = shape.left, shape.top
+        s_right, s_bottom = shape.left + shape.width, shape.top + shape.height
 
-    cropped = slide_image.crop((x1, y1, x2, y2))
-    
+        if (s_left >= pic_left - 100000 and s_right <= pic_right + 100000 and
+                s_top >= pic_top - 100000 and s_bottom <= pic_bottom + 100000):
+
+            # Relative coordinates percentage wrt target image
+            rel_x1 = max(0.0, min(1.0, (s_left - pic_left) / target_pic.width))
+            rel_y1 = max(0.0, min(1.0, (s_top - pic_top) / target_pic.height))
+            rel_x2 = max(0.0, min(1.0, (s_right - pic_left) / target_pic.width))
+            rel_y2 = max(0.0, min(1.0, (s_bottom - pic_top) / target_pic.height))
+
+            overlays.append((rel_x1, rel_y1, rel_x2, rel_y2))
+
+    return overlays
+
+
+def render_image_with_overlays(target_pic, overlays):
+    """Extracts base image and draws red rectangles on top"""
+    image_bytes = target_pic.image.blob
+    pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    width, height = pil_img.size
+
+    if overlays:
+        draw = ImageDraw.Draw(pil_img)
+        line_width = max(3, int(min(width, height) * 0.008))  # Dynamic line thickness
+
+        for rel_x1, rel_y1, rel_x2, rel_y2 in overlays:
+            x1 = int(rel_x1 * width)
+            y1 = int(rel_y1 * height)
+            x2 = int(rel_x2 * width)
+            y2 = int(rel_y2 * height)
+
+            # Draw Red Outline Box
+            for offset in range(line_width):
+                draw.rectangle(
+                    [x1 - offset, y1 - offset, x2 + offset, y2 + offset],
+                    outline="red"
+                )
+
     out = io.BytesIO()
-    cropped.save(out, format="JPEG", quality=95)
+    pil_img.save(out, format="JPEG", quality=95)
     return out.getvalue()
+
 
 uploaded_file = st.file_uploader("Upload PowerPoint File (.pptx)", type=["pptx"])
 
 if uploaded_file is not None:
     if st.button("▶️ Start Visual Extraction", type="primary", use_container_width=True):
-        with open("temp_input.pptx", "wb") as f:
-            f.write(uploaded_file.getbuffer())
-
-        prs = Presentation("temp_input.pptx")
+        prs = Presentation(uploaded_file)
         zip_buffer = io.BytesIO()
 
-        with st.spinner("Converting PPT slides to capture red markings..."):
-            try:
-                # Convert PPTX to PDF via LibreOffice (Linux Server Supported)
-                subprocess.run(
-                    ["libreoffice", "--headless", "--convert-to", "pdf", "temp_input.pptx"],
-                    check=True
-                )
-                rendered_images = convert_from_path("temp_input.pdf", dpi=200)
-            except Exception as e:
-                st.error(f"Rendering error: {e}")
-                rendered_images = []
-
-        if rendered_images:
+        with st.spinner("Extracting images and rendering Red Markings..."):
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
-                    
+
+                    # Find Picture Shapes sorted by left position
                     pic_shapes = [s for s in slide.shapes if getattr(s, "shape_type", None) == 13 or hasattr(s, "image")]
                     pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
-                    if pic_shapes and i < len(rendered_images):
+                    if pic_shapes:
                         target_pic = pic_shapes[-1] if "Image 2" in image_option else pic_shapes[0]
-                        
-                        final_bytes = crop_image_visually_from_slide(
-                            slide, target_pic, rendered_images[i], prs
-                        )
+
+                        # Find red overlaid shapes on top of this photo
+                        overlays = get_red_shapes_over_target(slide, target_pic)
+
+                        # Render final image with red box overlaid
+                        final_bytes = render_image_with_overlays(target_pic, overlays)
 
                         if not outlet_name:
                             outlet_name = f"Slide_{i+1}"
@@ -144,10 +169,10 @@ if uploaded_file is not None:
                         final_name = f"{'_'.join(components)}.jpg"
                         zip_file.writestr(final_name, final_bytes)
 
-            st.success("🎉 Process Complete with Red Overlay Marks!")
-            st.download_button(
-                label="📥 Download Visually Marked Images (ZIP)",
-                data=zip_buffer.getvalue(),
-                file_name="Marked_Images.zip",
-                mime="application/zip",
-            )
+        st.success("🎉 Process Completed Successfully!")
+        st.download_button(
+            label="📥 Download Visually Marked Images (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="Marked_Images.zip",
+            mime="application/zip",
+        )
