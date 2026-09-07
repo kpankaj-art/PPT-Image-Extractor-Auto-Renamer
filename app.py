@@ -5,17 +5,14 @@ from pptx import Presentation
 import streamlit as st
 from PIL import Image, ImageDraw
 
-st.set_page_config(
-    page_title="PPT Visual Marking Image Extractor", page_icon="🖼️", layout="wide"
-)
-st.title("🖼️ PPT Visual Image Extractor (Marking Fixed)")
+st.set_page_config(page_title="PPT Visual Extractor", page_icon="🖼️", layout="wide")
+st.title("🖼️ PPT Image Extractor (Marking Fixed)")
 
 image_option = st.radio(
     "Select Image to Export:",
     ("Image 1 (Left / Close View)", "Image 2 (Right / Far View)"),
     index=1,
 )
-
 
 def clean_text(text):
     if not text:
@@ -24,10 +21,8 @@ def clean_text(text):
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean.replace(" ", "_")
 
-
-def extract_info_from_slide(slide, slide_num):
+def extract_info_from_slide(slide):
     all_text_blocks = []
-
     def collect_text(shapes):
         for shape in shapes:
             if shape.has_text_frame and shape.text_frame.text.strip():
@@ -92,44 +87,49 @@ def extract_info_from_slide(slide, slide_num):
 
     return outlet_name, contact_no, media_type, size
 
-
-def draw_markings_on_target_image(slide, target_pic):
-    """Guaranteed overlay extraction for all marking box shapes"""
+def draw_precise_overlay(slide, target_pic):
     image_bytes = target_pic.image.blob
     pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    
+    # Handle PPT Crop ratios
+    crop_left = getattr(target_pic, 'crop_left', 0) or 0
+    crop_top = getattr(target_pic, 'crop_top', 0) or 0
+    crop_right = getattr(target_pic, 'crop_right', 0) or 0
+    crop_bottom = getattr(target_pic, 'crop_bottom', 0) or 0
+
+    orig_w, orig_h = pil_img.size
+
+    # Crop original image according to PPT picture cropping
+    left_px = int(crop_left * orig_w)
+    top_px = int(crop_top * orig_h)
+    right_px = int((1 - crop_right) * orig_w)
+    bottom_px = int((1 - crop_bottom) * orig_h)
+
+    if right_px > left_px and bottom_px > top_px:
+        pil_img = pil_img.crop((left_px, top_px, right_px, bottom_px))
+
     img_w, img_h = pil_img.size
-
-    pic_left = target_pic.left
-    pic_top = target_pic.top
-    pic_w = target_pic.width
-    pic_h = target_pic.height
-
     draw = ImageDraw.Draw(pil_img)
     line_thickness = max(4, int(min(img_w, img_h) * 0.012))
 
-    for shape in slide.shapes:
-        if shape == target_pic:
-            continue
+    pic_left, pic_top = target_pic.left, target_pic.top
+    pic_w, pic_h = target_pic.width, target_pic.height
 
-        # Ignore shapes with full text labels
-        if shape.has_text_frame and len(shape.text_frame.text.strip()) > 2:
+    for shape in slide.shapes:
+        if shape == target_pic or (shape.has_text_frame and len(shape.text_frame.text.strip()) > 2):
             continue
 
         s_left, s_top = shape.left, shape.top
         s_w, s_h = shape.width, shape.height
 
-        # Ignore main border blue frames & full background frames
+        # Filter large frame borders
         if s_w >= pic_w * 0.85 and s_h >= pic_h * 0.85:
             continue
 
-        # Check if shape lies over target photo region
-        if (
-            s_left + s_w > pic_left
-            and s_left < pic_left + pic_w
-            and s_top + s_h > pic_top
-            and s_top < pic_top + pic_h
-        ):
-            # Calculate pixel bounds on image
+        # Overlap check with picture frame on slide
+        if (s_left + s_w > pic_left and s_left < pic_left + pic_w and
+            s_top + s_h > pic_top and s_top < pic_top + pic_h):
+
             rel_x1 = max(0.0, min(1.0, (s_left - pic_left) / pic_w))
             rel_y1 = max(0.0, min(1.0, (s_top - pic_top) / pic_h))
             rel_x2 = max(0.0, min(1.0, (s_left + s_w - pic_left) / pic_w))
@@ -139,38 +139,28 @@ def draw_markings_on_target_image(slide, target_pic):
             px2, py2 = int(rel_x2 * img_w), int(rel_y2 * img_h)
 
             if abs(px2 - px1) > 2 and abs(py2 - py1) > 2:
-                # Draw high-visibility Red Box over the exact spot
                 for off in range(line_thickness):
-                    draw.rectangle(
-                        [px1 - off, py1 - off, px2 + off, py2 + off],
-                        outline="#FF0000",
-                    )
+                    draw.rectangle([px1 - off, py1 - off, px2 + off, py2 + off], outline="#FF0000")
 
     out = io.BytesIO()
     pil_img.save(out, format="JPEG", quality=95)
     return out.getvalue()
 
-
 uploaded_file = st.file_uploader("Upload PowerPoint File (.pptx)", type=["pptx"])
 
 if uploaded_file is not None:
-    if st.button("▶️ Start Visual Extraction", type="primary", use_container_width=True):
+    if st.button("▶️ Start Extraction", type="primary", use_container_width=True):
         prs = Presentation(uploaded_file)
         zip_buffer = io.BytesIO()
-
         total_slides = len(prs.slides)
         progress_bar = st.progress(0)
 
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             for i, slide in enumerate(prs.slides):
-                outlet_name, contact_no, media_type, size = extract_info_from_slide(
-                    slide, i + 1
-                )
+                outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
 
-                # Filter real picture shapes (width check eliminates empty blue frames)
                 pic_shapes = [
-                    s
-                    for s in slide.shapes
+                    s for s in slide.shapes
                     if (getattr(s, "shape_type", None) == 13 or hasattr(s, "image"))
                     and s.width > 1000000
                 ]
@@ -178,9 +168,7 @@ if uploaded_file is not None:
 
                 if pic_shapes:
                     target_pic = pic_shapes[-1]
-
-                    # Burn red box marking directly on image
-                    final_bytes = draw_markings_on_target_image(slide, target_pic)
+                    final_bytes = draw_precise_overlay(slide, target_pic)
 
                     components = []
                     if outlet_name:
@@ -200,10 +188,10 @@ if uploaded_file is not None:
 
                 progress_bar.progress((i + 1) / total_slides)
 
-        st.success("🎉 Extraction Finished!")
+        st.success("🎉 Processing Finished!")
         st.download_button(
-            label="📥 Download Fixed Marked Images (ZIP)",
+            label="📥 Download Fixed Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Final_Marked_Images.zip",
+            file_name="Fixed_Marked_Images.zip",
             mime="application/zip",
         )
