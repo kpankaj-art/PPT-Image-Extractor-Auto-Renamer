@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import gc
 import subprocess
 import tempfile
 import zipfile
@@ -10,8 +11,8 @@ from pptx import Presentation
 from PIL import Image
 
 st.set_page_config(page_title="PPT Screen-Crop Extractor", page_icon="✂️", layout="wide")
-st.title("✂️ PPT Visual Screen-Crop Extractor (Snipping Method)")
-st.caption("Memory Optimized - Prevents Crashes on Large PPTs")
+st.title("✂️ PPT Visual Screen-Crop Extractor (Single-Slide Memory Clean)")
+st.caption("Processes 1 slide at a time and cleans RAM memory automatically to prevent crashes!")
 
 image_option = st.radio(
     "Select Image to Export:",
@@ -95,88 +96,103 @@ def extract_info_from_slide(slide):
 uploaded_file = st.file_uploader("Upload PowerPoint File (.pptx)", type=["pptx"])
 
 if uploaded_file is not None:
-    if st.button("▶️ Start Snipping Tool Crop", type="primary", use_container_width=True):
+    if st.button("▶️ Start Single-Slide Processing", type="primary", use_container_width=True):
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 pptx_path = os.path.join(tmpdir, "input.pptx")
                 with open(pptx_path, "wb") as f:
                     f.write(uploaded_file.getvalue())
 
-                prs = Presentation(pptx_path)
-                slide_width = prs.slide_width
-                slide_height = prs.slide_height
-
-                st.info("Converting PPT to Visual PDF...")
-                cmd = f"soffice --headless --convert-to pdf {pptx_path} --outdir {tmpdir}"
-                res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-
-                pdf_path = os.path.join(tmpdir, "input.pdf")
-                if not os.path.exists(pdf_path):
-                    st.error("Conversion failed! Check LibreOffice or PPT file format.")
-                    st.stop()
-
+                full_prs = Presentation(pptx_path)
+                total_slides = len(full_prs.slides)
                 zip_buffer = io.BytesIO()
-                total_slides = len(prs.slides)
                 progress_bar = st.progress(0)
 
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                    for i, slide in enumerate(prs.slides):
-                        outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
+                    for i in range(total_slides):
+                        # 1. Create a temporary PPTX containing ONLY 1 SLIDE
+                        single_prs = Presentation()
+                        single_prs.slide_width = full_prs.slide_width
+                        single_prs.slide_height = full_prs.slide_height
 
-                        pic_shapes = [
-                            s for s in slide.shapes
-                            if (getattr(s, "shape_type", None) == 13 or hasattr(s, "image"))
-                            and s.width > 1000000
-                        ]
-                        pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
+                        source_slide = full_prs.slides[i]
+                        blank_slide_layout = single_prs.slide_layouts[6]
+                        new_slide = single_prs.slides.add_slide(blank_slide_layout)
 
-                        if pic_shapes:
-                            # Convert only single page at a time to save RAM Memory
-                            page_imgs = convert_from_path(
-                                pdf_path,
-                                dpi=120, # Reduced DPI slightly for speed & low memory
-                                first_page=i+1,
-                                last_page=i+1
+                        # Copy all shapes to single slide
+                        for shape in source_slide.shapes:
+                            new_slide.shapes._spTree.insert_element_before(
+                                shape.element, 'p:extLst'
                             )
 
+                        single_pptx_path = os.path.join(tmpdir, "single.pptx")
+                        single_prs.save(single_pptx_path)
+
+                        # 2. Convert ONLY THIS 1 SLIDE to PDF using LibreOffice
+                        cmd = f"soffice --headless --convert-to pdf {single_pptx_path} --outdir {tmpdir}"
+                        subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+                        single_pdf_path = os.path.join(tmpdir, "single.pdf")
+
+                        if os.path.exists(single_pdf_path):
+                            page_imgs = convert_from_path(single_pdf_path, dpi=130)
+                            
                             if page_imgs:
                                 slide_img = page_imgs[0]
                                 img_w, img_h = slide_img.size
 
-                                if "Image 2" in image_option or len(pic_shapes) == 1:
-                                    target_pic = pic_shapes[-1]
-                                else:
-                                    target_pic = pic_shapes[0]
+                                outlet_name, contact_no, media_type, size = extract_info_from_slide(source_slide)
 
-                                crop_x1 = int((target_pic.left / slide_width) * img_w)
-                                crop_y1 = int((target_pic.top / slide_height) * img_h)
-                                crop_x2 = int(((target_pic.left + target_pic.width) / slide_width) * img_w)
-                                crop_y2 = int(((target_pic.top + target_pic.height) / slide_height) * img_h)
+                                pic_shapes = [
+                                    s for s in source_slide.shapes
+                                    if (getattr(s, "shape_type", None) == 13 or hasattr(s, "image"))
+                                    and s.width > 1000000
+                                ]
+                                pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
-                                cropped_img = slide_img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+                                if pic_shapes:
+                                    if "Image 2" in image_option or len(pic_shapes) == 1:
+                                        target_pic = pic_shapes[-1]
+                                    else:
+                                        target_pic = pic_shapes[0]
 
-                                out_bytes = io.BytesIO()
-                                cropped_img.save(out_bytes, format="JPEG", quality=85)
+                                    crop_x1 = int((target_pic.left / full_prs.slide_width) * img_w)
+                                    crop_y1 = int((target_pic.top / full_prs.slide_height) * img_h)
+                                    crop_x2 = int(((target_pic.left + target_pic.width) / full_prs.slide_width) * img_w)
+                                    crop_y2 = int(((target_pic.top + target_pic.height) / full_prs.slide_height) * img_h)
 
-                                components = []
-                                if outlet_name:
-                                    components.append(clean_text(outlet_name))
-                                if contact_no:
-                                    components.append(clean_text(contact_no))
-                                if media_type:
-                                    components.append(clean_text(media_type))
-                                if size:
-                                    components.append(clean_text(size))
+                                    cropped_img = slide_img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
 
-                                if not components:
-                                    components.append(f"Store_{i+1}")
+                                    out_bytes = io.BytesIO()
+                                    cropped_img.save(out_bytes, format="JPEG", quality=85)
 
-                                final_name = f"{'_'.join(components)}.jpg"
-                                zip_file.writestr(final_name, out_bytes.getvalue())
+                                    components = []
+                                    if outlet_name:
+                                        components.append(clean_text(outlet_name))
+                                    if contact_no:
+                                        components.append(clean_text(contact_no))
+                                    if media_type:
+                                        components.append(clean_text(media_type))
+                                    if size:
+                                        components.append(clean_text(size))
 
+                                    if not components:
+                                        components.append(f"Store_{i+1}")
+
+                                    final_name = f"{'_'.join(components)}.jpg"
+                                    zip_file.writestr(final_name, out_bytes.getvalue())
+
+                            # Clean up slide temp files
+                            os.remove(single_pdf_path)
+                        
+                        if os.path.exists(single_pptx_path):
+                            os.remove(single_pptx_path)
+
+                        # 3. FORCE RAM MEMORY CLEANUP
+                        gc.collect()
                         progress_bar.progress((i + 1) / total_slides)
 
-                st.success("🎉 Visual Screen Snipping Completed Successfully!")
+                st.success("🎉 Single-Slide Extraction Completed Successfully!")
                 st.download_button(
                     label="📥 Download Snipped Marked Images (ZIP)",
                     data=zip_buffer.getvalue(),
