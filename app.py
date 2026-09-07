@@ -1,5 +1,4 @@
 import io
-import math
 import re
 import zipfile
 from pptx import Presentation
@@ -7,14 +6,10 @@ import streamlit as st
 from PIL import Image, ImageDraw
 
 st.set_page_config(
-    page_title="PPT Image & Marking Composite Extractor",
-    page_icon="🖼️",
-    layout="wide",
+    page_title="PPT Visual Marking Extractor", page_icon="🖼️", layout="wide"
 )
-st.title("🖼️ PPT Image & Overlay Marking Extractor")
-st.caption(
-    "Detects image along with overlaid Red Box shapes, composites them together, and renames smartly."
-)
+st.title("🖼️ PPT Visual Image Extractor")
+st.caption("Filters big slide containers and draws ONLY small inner red box markings on the photo.")
 
 image_option = st.radio(
     "Select Image to Export:",
@@ -51,7 +46,6 @@ def extract_info_from_slide(slide, slide_num):
 
     outlet_name, contact_no, media_type, size = "", "", "", ""
 
-    # Search Outlet Name explicitly
     outlet_match = re.search(
         r"(?:Outlet\s*Name|Customer\s*Name|Store\s*Name|Shop\s*Name)\s*[:\-]?\s*([^\n\r]+)",
         full_text,
@@ -67,7 +61,6 @@ def extract_info_from_slide(slide, slide_num):
         if cleaned_name and len(cleaned_name) > 2:
             outlet_name = cleaned_name
 
-    # Fallback to first non-label text block
     if not outlet_name and all_text_blocks:
         for block in all_text_blocks:
             lines = [l.strip() for l in block.split("\n") if l.strip()]
@@ -101,10 +94,10 @@ def extract_info_from_slide(slide, slide_num):
     return outlet_name, contact_no, media_type, size
 
 
-def composite_image_and_marking(slide, target_pic):
-    """Parses PPT XML bounding boxes of overlay red shapes and draws them over the base image"""
+def draw_only_inner_small_markings(slide, target_pic):
+    """Detects ONLY small highlight box shapes placed inside the image boundary"""
     image_bytes = target_pic.image.blob
-    pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img_w, img_h = pil_img.size
 
     pic_left = target_pic.left
@@ -112,84 +105,77 @@ def composite_image_and_marking(slide, target_pic):
     pic_w = target_pic.width
     pic_h = target_pic.height
 
-    # Overlay layer creation
-    overlay_layer = Image.new("RGBA", (img_w, img_h), (255, 255, 255, 0))
-    draw = ImageDraw.Draw(overlay_layer)
-
-    # Dynamic line width based on photo resolution
-    line_thick = max(4, int(min(img_w, img_h) * 0.012))
+    draw = ImageDraw.Draw(pil_img)
+    line_thickness = max(3, int(min(img_w, img_h) * 0.008))
 
     for shape in slide.shapes:
         if shape == target_pic:
             continue
 
-        # Skip slide main containers / text boxes
-        if shape.has_text_frame and len(shape.text_frame.text.strip()) > 3:
+        # Skip shapes with text
+        if shape.has_text_frame and len(shape.text_frame.text.strip()) > 0:
             continue
 
         s_left, s_top = shape.left, shape.top
         s_w, s_h = shape.width, shape.height
 
-        # Check if shape bounding box overlaps target image
-        if (
-            s_left + s_w > pic_left - 50000
-            and s_left < pic_left + pic_w + 50000
-            and s_top + s_h > pic_top - 50000
-            and s_top < pic_top + pic_h + 50000
-        ):
-            # Calculate pixel positions relative to the picture box
-            rel_x1 = (s_left - pic_left) / pic_w
-            rel_y1 = (s_top - pic_top) / pic_h
-            rel_x2 = (s_left + s_w - pic_left) / pic_w
-            rel_y2 = (s_top + s_h - pic_top) / pic_h
+        # --- STRICT CRITERIA FOR INNER SMALL BOX MARKING ---
+        # 1. Shape MUST be smaller than 60% of the picture dimensions (Filters outer frames/big blue boxes)
+        is_small_box = (s_w < pic_w * 0.6) and (s_h < pic_h * 0.6)
 
-            px1 = int(rel_x1 * img_w)
-            py1 = int(rel_y1 * img_h)
-            px2 = int(rel_x2 * img_w)
-            py2 = int(rel_y2 * img_h)
+        # 2. Shape center MUST be inside the image frame
+        s_center_x = s_left + (s_w / 2)
+        s_center_y = s_top + (s_h / 2)
 
-            # Ensure box size is valid
-            if abs(px2 - px1) >= 2 and abs(py2 - py1) >= 2:
-                for t in range(line_thick):
+        is_inside_photo = (
+            pic_left <= s_center_x <= (pic_left + pic_w)
+            and pic_top <= s_center_y <= (pic_top + pic_h)
+        )
+
+        if is_small_box and is_inside_photo:
+            # Map shape position relative to photo pixels
+            rel_x1 = max(0.0, min(1.0, (s_left - pic_left) / pic_w))
+            rel_y1 = max(0.0, min(1.0, (s_top - pic_top) / pic_h))
+            rel_x2 = max(0.0, min(1.0, (s_left + s_w - pic_left) / pic_w))
+            rel_y2 = max(0.0, min(1.0, (s_top + s_h - pic_top) / pic_h))
+
+            px1, py1 = int(rel_x1 * img_w), int(rel_y1 * img_h)
+            px2, py2 = int(rel_x2 * img_w), int(rel_y2 * img_h)
+
+            if abs(px2 - px1) > 2 and abs(py2 - py1) > 2:
+                # Draw sharp red outline on the small inner box area
+                for off in range(line_thickness):
                     draw.rectangle(
-                        [px1 - t, py1 - t, px2 + t, py2 + t],
-                        outline=(255, 0, 0, 255),
+                        [px1 - off, py1 - off, px2 + off, py2 + off],
+                        outline="#FF0000",
                     )
 
-    # Composite base image with drawn overlay
-    final_img = Image.alpha_composite(pil_img, overlay_layer).convert("RGB")
-
     out = io.BytesIO()
-    final_img.save(out, format="JPEG", quality=95)
+    pil_img.save(out, format="JPEG", quality=95)
     return out.getvalue()
 
 
 uploaded_file = st.file_uploader("Upload PowerPoint File (.pptx)", type=["pptx"])
 
 if uploaded_file is not None:
-    if st.button(
-        "▶️ Start Composite Extraction", type="primary", use_container_width=True
-    ):
+    if st.button("▶️ Start Visual Extraction", type="primary", use_container_width=True):
         prs = Presentation(uploaded_file)
         zip_buffer = io.BytesIO()
 
         total_slides = len(prs.slides)
         progress_bar = st.progress(0)
 
-        with zipfile.ZipFile(
-            zip_buffer, "a", zipfile.ZIP_DEFLATED, False
-        ) as zip_file:
+        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             for i, slide in enumerate(prs.slides):
-                outlet_name, contact_no, media_type, size = (
-                    extract_info_from_slide(slide, i + 1)
+                outlet_name, contact_no, media_type, size = extract_info_from_slide(
+                    slide, i + 1
                 )
 
-                # Fetch pictures sorted left-to-right
+                # Fetch pictures sorted left to right
                 pic_shapes = [
                     s
                     for s in slide.shapes
-                    if getattr(s, "shape_type", None) == 13
-                    or hasattr(s, "image")
+                    if getattr(s, "shape_type", None) == 13 or hasattr(s, "image")
                 ]
                 pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
@@ -198,8 +184,8 @@ if uploaded_file is not None:
                         pic_shapes[-1] if "Image 2" in image_option else pic_shapes[0]
                     )
 
-                    # Extract Image + Red Box Layer together
-                    final_bytes = composite_image_and_marking(slide, target_pic)
+                    # Extract image and render ONLY small inner red box
+                    final_bytes = draw_only_inner_small_markings(slide, target_pic)
 
                     components = []
                     if outlet_name:
@@ -211,7 +197,6 @@ if uploaded_file is not None:
                     if size:
                         components.append(clean_text(size))
 
-                    # Clean filename (no "Slide_" prefix)
                     if not components:
                         components.append(f"Store_{i+1}")
 
@@ -220,10 +205,10 @@ if uploaded_file is not None:
 
                 progress_bar.progress((i + 1) / total_slides)
 
-        st.success("🎉 Extraction Completed with Markings Combined!")
+        st.success("🎉 Extraction Completed Successfully!")
         st.download_button(
-            label="📥 Download Extracted Images with Markings (ZIP)",
+            label="📥 Download Clean Marked Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Composited_Marked_Images.zip",
+            file_name="Clean_Marked_Images.zip",
             mime="application/zip",
         )
