@@ -11,9 +11,8 @@ from PIL import Image
 
 st.set_page_config(page_title="PPT Screen-Crop Extractor", page_icon="✂️", layout="wide")
 st.title("✂️ PPT Visual Screen-Crop Extractor (Snipping Method)")
-st.caption("Captures EXACT visual state of the slide just like Windows Snipping Tool!")
+st.caption("Memory Optimized - Prevents Crashes on Large PPTs")
 
-# --- LEFT / RIGHT SELECTION OPTION ---
 image_option = st.radio(
     "Select Image to Export:",
     ("Image 1 (Left / Close View)", "Image 2 (Right / Far View)"),
@@ -97,81 +96,92 @@ uploaded_file = st.file_uploader("Upload PowerPoint File (.pptx)", type=["pptx"]
 
 if uploaded_file is not None:
     if st.button("▶️ Start Snipping Tool Crop", type="primary", use_container_width=True):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            pptx_path = os.path.join(tmpdir, "input.pptx")
-            with open(pptx_path, "wb") as f:
-                f.write(uploaded_file.getvalue())
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                pptx_path = os.path.join(tmpdir, "input.pptx")
+                with open(pptx_path, "wb") as f:
+                    f.write(uploaded_file.getvalue())
 
-            prs = Presentation(pptx_path)
-            slide_width = prs.slide_width
-            slide_height = prs.slide_height
+                prs = Presentation(pptx_path)
+                slide_width = prs.slide_width
+                slide_height = prs.slide_height
 
-            st.info("Rendering visual slides...")
-            cmd = f"soffice --headless --convert-to pdf {pptx_path} --outdir {tmpdir}"
-            subprocess.run(cmd, shell=True, check=True)
+                st.info("Converting PPT to Visual PDF...")
+                cmd = f"soffice --headless --convert-to pdf {pptx_path} --outdir {tmpdir}"
+                res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 
-            pdf_path = os.path.join(tmpdir, "input.pdf")
-            rendered_images = convert_from_path(pdf_path, dpi=200)
+                pdf_path = os.path.join(tmpdir, "input.pdf")
+                if not os.path.exists(pdf_path):
+                    st.error("Conversion failed! Check LibreOffice or PPT file format.")
+                    st.stop()
 
-            zip_buffer = io.BytesIO()
-            total_slides = len(prs.slides)
-            progress_bar = st.progress(0)
+                zip_buffer = io.BytesIO()
+                total_slides = len(prs.slides)
+                progress_bar = st.progress(0)
 
-            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                for i, slide in enumerate(prs.slides):
-                    outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
+                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                    for i, slide in enumerate(prs.slides):
+                        outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
 
-                    # Target pictures detection
-                    pic_shapes = [
-                        s for s in slide.shapes
-                        if (getattr(s, "shape_type", None) == 13 or hasattr(s, "image"))
-                        and s.width > 1000000
-                    ]
-                    pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
+                        pic_shapes = [
+                            s for s in slide.shapes
+                            if (getattr(s, "shape_type", None) == 13 or hasattr(s, "image"))
+                            and s.width > 1000000
+                        ]
+                        pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
-                    if pic_shapes and i < len(rendered_images):
-                        # Use selected radio option or fallback to single available photo
-                        if "Image 2" in image_option or len(pic_shapes) == 1:
-                            target_pic = pic_shapes[-1]
-                        else:
-                            target_pic = pic_shapes[0]
-                        
-                        slide_img = rendered_images[i]
-                        img_w, img_h = slide_img.size
+                        if pic_shapes:
+                            # Convert only single page at a time to save RAM Memory
+                            page_imgs = convert_from_path(
+                                pdf_path,
+                                dpi=120, # Reduced DPI slightly for speed & low memory
+                                first_page=i+1,
+                                last_page=i+1
+                            )
 
-                        # Crop bounds
-                        crop_x1 = int((target_pic.left / slide_width) * img_w)
-                        crop_y1 = int((target_pic.top / slide_height) * img_h)
-                        crop_x2 = int(((target_pic.left + target_pic.width) / slide_width) * img_w)
-                        crop_y2 = int(((target_pic.top + target_pic.height) / slide_height) * img_h)
+                            if page_imgs:
+                                slide_img = page_imgs[0]
+                                img_w, img_h = slide_img.size
 
-                        cropped_img = slide_img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+                                if "Image 2" in image_option or len(pic_shapes) == 1:
+                                    target_pic = pic_shapes[-1]
+                                else:
+                                    target_pic = pic_shapes[0]
 
-                        out_bytes = io.BytesIO()
-                        cropped_img.save(out_bytes, format="JPEG", quality=95)
+                                crop_x1 = int((target_pic.left / slide_width) * img_w)
+                                crop_y1 = int((target_pic.top / slide_height) * img_h)
+                                crop_x2 = int(((target_pic.left + target_pic.width) / slide_width) * img_w)
+                                crop_y2 = int(((target_pic.top + target_pic.height) / slide_height) * img_h)
 
-                        components = []
-                        if outlet_name:
-                            components.append(clean_text(outlet_name))
-                        if contact_no:
-                            components.append(clean_text(contact_no))
-                        if media_type:
-                            components.append(clean_text(media_type))
-                        if size:
-                            components.append(clean_text(size))
+                                cropped_img = slide_img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
 
-                        if not components:
-                            components.append(f"Store_{i+1}")
+                                out_bytes = io.BytesIO()
+                                cropped_img.save(out_bytes, format="JPEG", quality=85)
 
-                        final_name = f"{'_'.join(components)}.jpg"
-                        zip_file.writestr(final_name, out_bytes.getvalue())
+                                components = []
+                                if outlet_name:
+                                    components.append(clean_text(outlet_name))
+                                if contact_no:
+                                    components.append(clean_text(contact_no))
+                                if media_type:
+                                    components.append(clean_text(media_type))
+                                if size:
+                                    components.append(clean_text(size))
 
-                    progress_bar.progress((i + 1) / total_slides)
+                                if not components:
+                                    components.append(f"Store_{i+1}")
 
-            st.success("🎉 Visual Screen Snipping Completed Successfully!")
-            st.download_button(
-                label="📥 Download Snipped Marked Images (ZIP)",
-                data=zip_buffer.getvalue(),
-                file_name="Snipped_Marked_Images.zip",
-                mime="application/zip",
-            )
+                                final_name = f"{'_'.join(components)}.jpg"
+                                zip_file.writestr(final_name, out_bytes.getvalue())
+
+                        progress_bar.progress((i + 1) / total_slides)
+
+                st.success("🎉 Visual Screen Snipping Completed Successfully!")
+                st.download_button(
+                    label="📥 Download Snipped Marked Images (ZIP)",
+                    data=zip_buffer.getvalue(),
+                    file_name="Snipped_Marked_Images.zip",
+                    mime="application/zip",
+                )
+        except Exception as e:
+            st.error(f"Error: {str(e)}")
