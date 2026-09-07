@@ -13,6 +13,13 @@ st.set_page_config(page_title="PPT Screen-Crop Extractor", page_icon="✂️", l
 st.title("✂️ PPT Visual Screen-Crop Extractor (Snipping Method)")
 st.caption("Captures EXACT visual state of the slide just like Windows Snipping Tool!")
 
+# --- LEFT / RIGHT SELECTION OPTION ---
+image_option = st.radio(
+    "Select Image to Export:",
+    ("Image 1 (Left / Close View)", "Image 2 (Right / Far View)"),
+    index=1,
+)
+
 def clean_text(text):
     if not text:
         return ""
@@ -99,7 +106,6 @@ if uploaded_file is not None:
             slide_width = prs.slide_width
             slide_height = prs.slide_height
 
-            # Convert PPTX to PDF using LibreOffice (for accurate visual rendering)
             st.info("Rendering visual slides...")
             cmd = f"soffice --headless --convert-to pdf {pptx_path} --outdir {tmpdir}"
             subprocess.run(cmd, shell=True, check=True)
@@ -115,7 +121,7 @@ if uploaded_file is not None:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
 
-                    # Find target picture coordinates on the slide
+                    # Target pictures detection
                     pic_shapes = [
                         s for s in slide.shapes
                         if (getattr(s, "shape_type", None) == 13 or hasattr(s, "image"))
@@ -124,18 +130,21 @@ if uploaded_file is not None:
                     pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
                     if pic_shapes and i < len(rendered_images):
-                        target_pic = pic_shapes[-1]
+                        # Use selected radio option or fallback to single available photo
+                        if "Image 2" in image_option or len(pic_shapes) == 1:
+                            target_pic = pic_shapes[-1]
+                        else:
+                            target_pic = pic_shapes[0]
                         
                         slide_img = rendered_images[i]
                         img_w, img_h = slide_img.size
 
-                        # Calculate relative crop rectangle for the target photo
+                        # Crop bounds
                         crop_x1 = int((target_pic.left / slide_width) * img_w)
                         crop_y1 = int((target_pic.top / slide_height) * img_h)
                         crop_x2 = int(((target_pic.left + target_pic.width) / slide_width) * img_w)
                         crop_y2 = int(((target_pic.top + target_pic.height) / slide_height) * img_h)
 
-                        # Crop visually (exact Snipping Tool behavior)
                         cropped_img = slide_img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
 
                         out_bytes = io.BytesIO()
