@@ -6,10 +6,10 @@ import streamlit as st
 from PIL import Image, ImageDraw
 
 st.set_page_config(
-    page_title="PPT Visual Marking Extractor", page_icon="🖼️", layout="wide"
+    page_title="PPT Visual Marking Image Extractor", page_icon="🖼️", layout="wide"
 )
-st.title("🖼️ PPT Visual Image Extractor")
-st.caption("Filters big slide containers and draws ONLY small inner red box markings on the photo.")
+st.title("🖼️ PPT Visual Image Extractor (Multi-Color Marking Support)")
+st.caption("Extracts images and detects ALL overlay shape colors (Red, Orange, Yellow, Blue, Green, etc.).")
 
 image_option = st.radio(
     "Select Image to Export:",
@@ -94,8 +94,23 @@ def extract_info_from_slide(slide, slide_num):
     return outlet_name, contact_no, media_type, size
 
 
-def draw_only_inner_small_markings(slide, target_pic):
-    """Detects ONLY small highlight box shapes placed inside the image boundary"""
+def get_shape_color(shape):
+    """Extracts exact outline color of shape or defaults to bright red if undetected"""
+    try:
+        if hasattr(shape, "line") and shape.line.color and shape.line.color.rgb:
+            rgb = shape.line.color.rgb
+            return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+        elif hasattr(shape, "fill") and shape.fill.fore_color and shape.fill.fore_color.rgb:
+            rgb = shape.fill.fore_color.rgb
+            return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+    except Exception:
+        pass
+    # Fallback to standard Red if PPT line theme isn't explicitly defined
+    return "#FF0000"
+
+
+def draw_markings_on_target_image(slide, target_pic):
+    """Detects and overlays any colored box shape (Red, Yellow, Blue, Orange, etc.) over the target image"""
     image_bytes = target_pic.image.blob
     pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img_w, img_h = pil_img.size
@@ -106,34 +121,37 @@ def draw_only_inner_small_markings(slide, target_pic):
     pic_h = target_pic.height
 
     draw = ImageDraw.Draw(pil_img)
-    line_thickness = max(3, int(min(img_w, img_h) * 0.008))
+    line_thickness = max(4, int(min(img_w, img_h) * 0.01))
 
     for shape in slide.shapes:
         if shape == target_pic:
             continue
 
-        # Skip shapes with text
+        # Skip text blocks and layout containers
         if shape.has_text_frame and len(shape.text_frame.text.strip()) > 0:
             continue
 
         s_left, s_top = shape.left, shape.top
         s_w, s_h = shape.width, shape.height
 
-        # --- STRICT CRITERIA FOR INNER SMALL BOX MARKING ---
-        # 1. Shape MUST be smaller than 60% of the picture dimensions (Filters outer frames/big blue boxes)
-        is_small_box = (s_w < pic_w * 0.6) and (s_h < pic_h * 0.6)
+        # Ignore outer background borders
+        if s_w >= pic_w * 0.9 and s_h >= pic_h * 0.9:
+            continue
 
-        # 2. Shape center MUST be inside the image frame
-        s_center_x = s_left + (s_w / 2)
-        s_center_y = s_top + (s_h / 2)
+        s_cx = s_left + (s_w / 2)
+        s_cy = s_top + (s_h / 2)
 
-        is_inside_photo = (
-            pic_left <= s_center_x <= (pic_left + pic_w)
-            and pic_top <= s_center_y <= (pic_top + pic_h)
+        # Check if shape center falls over target image
+        is_overlapping = (
+            pic_left - 100000 <= s_cx <= pic_left + pic_w + 100000
+            and pic_top - 100000 <= s_cy <= pic_top + pic_h + 100000
         )
 
-        if is_small_box and is_inside_photo:
-            # Map shape position relative to photo pixels
+        if is_overlapping and s_w > 0 and s_h > 0:
+            # Detect shape's original border color dynamically
+            stroke_color = get_shape_color(shape)
+
+            # Map relative coordinates onto photo pixels
             rel_x1 = max(0.0, min(1.0, (s_left - pic_left) / pic_w))
             rel_y1 = max(0.0, min(1.0, (s_top - pic_top) / pic_h))
             rel_x2 = max(0.0, min(1.0, (s_left + s_w - pic_left) / pic_w))
@@ -143,11 +161,11 @@ def draw_only_inner_small_markings(slide, target_pic):
             px2, py2 = int(rel_x2 * img_w), int(rel_y2 * img_h)
 
             if abs(px2 - px1) > 2 and abs(py2 - py1) > 2:
-                # Draw sharp red outline on the small inner box area
+                # Draw box in its native detected color
                 for off in range(line_thickness):
                     draw.rectangle(
                         [px1 - off, py1 - off, px2 + off, py2 + off],
-                        outline="#FF0000",
+                        outline=stroke_color,
                     )
 
     out = io.BytesIO()
@@ -171,21 +189,23 @@ if uploaded_file is not None:
                     slide, i + 1
                 )
 
-                # Fetch pictures sorted left to right
+                # Filter valid picture shapes sorted left to right
                 pic_shapes = [
                     s
                     for s in slide.shapes
-                    if getattr(s, "shape_type", None) == 13 or hasattr(s, "image")
+                    if (getattr(s, "shape_type", None) == 13 or hasattr(s, "image"))
+                    and s.width > 500000
                 ]
                 pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
                 if pic_shapes:
-                    target_pic = (
-                        pic_shapes[-1] if "Image 2" in image_option else pic_shapes[0]
-                    )
+                    if "Image 2" in image_option or len(pic_shapes) == 1:
+                        target_pic = pic_shapes[-1]
+                    else:
+                        target_pic = pic_shapes[0]
 
-                    # Extract image and render ONLY small inner red box
-                    final_bytes = draw_only_inner_small_markings(slide, target_pic)
+                    # Overlay markings (any color)
+                    final_bytes = draw_markings_on_target_image(slide, target_pic)
 
                     components = []
                     if outlet_name:
@@ -205,10 +225,10 @@ if uploaded_file is not None:
 
                 progress_bar.progress((i + 1) / total_slides)
 
-        st.success("🎉 Extraction Completed Successfully!")
+        st.success("🎉 Extraction Completed with Multi-Color Markings!")
         st.download_button(
-            label="📥 Download Clean Marked Images (ZIP)",
+            label="📥 Download Extracted Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Clean_Marked_Images.zip",
+            file_name="Marked_Images_MultiColor.zip",
             mime="application/zip",
         )
