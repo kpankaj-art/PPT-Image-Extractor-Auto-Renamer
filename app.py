@@ -1,19 +1,17 @@
 import io
+import os
 import re
+import subprocess
+import tempfile
 import zipfile
 import streamlit as st
+from pdf2image import convert_from_path
 from pptx import Presentation
-from pptx.enum.shapes import MSO_SHAPE_TYPE
-from PIL import Image, ImageDraw
+from PIL import Image
 
-st.set_page_config(page_title="PPT Visual Extractor", page_icon="🖼️", layout="wide")
-st.title("🖼️ PPT Visual Image Extractor (Deep Group Scan Engine)")
-
-image_option = st.radio(
-    "Select Image to Export:",
-    ("Image 1 (Left / Close View)", "Image 2 (Right / Far View)"),
-    index=1,
-)
+st.set_page_config(page_title="PPT Screen-Crop Extractor", page_icon="✂️", layout="wide")
+st.title("✂️ PPT Visual Screen-Crop Extractor (Snipping Method)")
+st.caption("Captures EXACT visual state of the slide just like Windows Snipping Tool!")
 
 def clean_text(text):
     if not text:
@@ -24,7 +22,6 @@ def clean_text(text):
 
 def extract_info_from_slide(slide):
     all_text_blocks = []
-    
     def collect_text(shapes):
         for shape in shapes:
             if shape.has_text_frame and shape.text_frame.text.strip():
@@ -34,7 +31,7 @@ def extract_info_from_slide(slide):
                     for cell in row.cells:
                         if cell.text.strip():
                             all_text_blocks.append(cell.text.strip())
-            if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            if getattr(shape, "shape_type", None) == 6:
                 collect_text(shape.shapes)
 
     collect_text(slide.shapes)
@@ -89,128 +86,83 @@ def extract_info_from_slide(slide):
 
     return outlet_name, contact_no, media_type, size
 
-def get_all_flattened_shapes(shape_list):
-    """Recursively unpacks Grouped shapes into a flat list"""
-    flat = []
-    for s in shape_list:
-        if s.shape_type == MSO_SHAPE_TYPE.GROUP:
-            flat.extend(get_all_flattened_shapes(s.shapes))
-        else:
-            flat.append(s)
-    return flat
-
-def draw_precise_overlay(slide, target_pic):
-    image_bytes = target_pic.image.blob
-    pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    
-    # Check PPT cropping properties
-    crop_left = getattr(target_pic, 'crop_left', 0) or 0
-    crop_top = getattr(target_pic, 'crop_top', 0) or 0
-    crop_right = getattr(target_pic, 'crop_right', 0) or 0
-    crop_bottom = getattr(target_pic, 'crop_bottom', 0) or 0
-
-    orig_w, orig_h = pil_img.size
-
-    left_px = int(crop_left * orig_w)
-    top_px = int(crop_top * orig_h)
-    right_px = int((1 - crop_right) * orig_w)
-    bottom_px = int((1 - crop_bottom) * orig_h)
-
-    if right_px > left_px and bottom_px > top_px:
-        pil_img = pil_img.crop((left_px, top_px, right_px, bottom_px))
-
-    img_w, img_h = pil_img.size
-    draw = ImageDraw.Draw(pil_img)
-    line_thickness = max(5, int(min(img_w, img_h) * 0.015))
-
-    pic_left, pic_top = target_pic.left, target_pic.top
-    pic_w, pic_h = target_pic.width, target_pic.height
-
-    # Deep scan all nested/grouped shapes
-    all_shapes = get_all_flattened_shapes(slide.shapes)
-
-    for shape in all_shapes:
-        if shape == target_pic:
-            continue
-
-        # Skip full text boxes
-        if shape.has_text_frame and len(shape.text_frame.text.strip()) > 2:
-            continue
-
-        s_left, s_top = shape.left, shape.top
-        s_w, s_h = shape.width, shape.height
-
-        # Ignore slide background frames
-        if s_w >= pic_w * 0.85 and s_h >= pic_h * 0.85:
-            continue
-
-        # Check overlapping coordinates
-        if (s_left + s_w > pic_left and s_left < pic_left + pic_w and
-            s_top + s_h > pic_top and s_top < pic_top + pic_h):
-
-            rel_x1 = max(0.0, min(1.0, (s_left - pic_left) / pic_w))
-            rel_y1 = max(0.0, min(1.0, (s_top - pic_top) / pic_h))
-            rel_x2 = max(0.0, min(1.0, (s_left + s_w - pic_left) / pic_w))
-            rel_y2 = max(0.0, min(1.0, (s_top + s_h - pic_top) / pic_h))
-
-            px1, py1 = int(rel_x1 * img_w), int(rel_y1 * img_h)
-            px2, py2 = int(rel_x2 * img_w), int(rel_y2 * img_h)
-
-            if abs(px2 - px1) > 1 and abs(py2 - py1) > 1:
-                for off in range(line_thickness):
-                    draw.rectangle([px1 - off, py1 - off, px2 + off, py2 + off], outline="#FF0000")
-
-    out = io.BytesIO()
-    pil_img.save(out, format="JPEG", quality=95)
-    return out.getvalue()
-
 uploaded_file = st.file_uploader("Upload PowerPoint File (.pptx)", type=["pptx"])
 
 if uploaded_file is not None:
-    if st.button("▶️ Start Extraction", type="primary", use_container_width=True):
-        prs = Presentation(uploaded_file)
-        zip_buffer = io.BytesIO()
-        total_slides = len(prs.slides)
-        progress_bar = st.progress(0)
+    if st.button("▶️ Start Snipping Tool Crop", type="primary", use_container_width=True):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pptx_path = os.path.join(tmpdir, "input.pptx")
+            with open(pptx_path, "wb") as f:
+                f.write(uploaded_file.getvalue())
 
-        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-            for i, slide in enumerate(prs.slides):
-                outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
+            prs = Presentation(pptx_path)
+            slide_width = prs.slide_width
+            slide_height = prs.slide_height
 
-                all_shapes = get_all_flattened_shapes(slide.shapes)
-                pic_shapes = [
-                    s for s in all_shapes
-                    if (s.shape_type == MSO_SHAPE_TYPE.PICTURE or hasattr(s, "image"))
-                    and s.width > 1000000
-                ]
-                pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
+            # Convert PPTX to PDF using LibreOffice (for accurate visual rendering)
+            st.info("Rendering visual slides...")
+            cmd = f"soffice --headless --convert-to pdf {pptx_path} --outdir {tmpdir}"
+            subprocess.run(cmd, shell=True, check=True)
 
-                if pic_shapes:
-                    target_pic = pic_shapes[-1]
-                    final_bytes = draw_precise_overlay(slide, target_pic)
+            pdf_path = os.path.join(tmpdir, "input.pdf")
+            rendered_images = convert_from_path(pdf_path, dpi=200)
 
-                    components = []
-                    if outlet_name:
-                        components.append(clean_text(outlet_name))
-                    if contact_no:
-                        components.append(clean_text(contact_no))
-                    if media_type:
-                        components.append(clean_text(media_type))
-                    if size:
-                        components.append(clean_text(size))
+            zip_buffer = io.BytesIO()
+            total_slides = len(prs.slides)
+            progress_bar = st.progress(0)
 
-                    if not components:
-                        components.append(f"Store_{i+1}")
+            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                for i, slide in enumerate(prs.slides):
+                    outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
 
-                    final_name = f"{'_'.join(components)}.jpg"
-                    zip_file.writestr(final_name, final_bytes)
+                    # Find target picture coordinates on the slide
+                    pic_shapes = [
+                        s for s in slide.shapes
+                        if (getattr(s, "shape_type", None) == 13 or hasattr(s, "image"))
+                        and s.width > 1000000
+                    ]
+                    pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
-                progress_bar.progress((i + 1) / total_slides)
+                    if pic_shapes and i < len(rendered_images):
+                        target_pic = pic_shapes[-1]
+                        
+                        slide_img = rendered_images[i]
+                        img_w, img_h = slide_img.size
 
-        st.success("🎉 Processing Complete!")
-        st.download_button(
-            label="📥 Download Fixed Images (ZIP)",
-            data=zip_buffer.getvalue(),
-            file_name="DeepScan_Marked_Images.zip",
-            mime="application/zip",
-        )
+                        # Calculate relative crop rectangle for the target photo
+                        crop_x1 = int((target_pic.left / slide_width) * img_w)
+                        crop_y1 = int((target_pic.top / slide_height) * img_h)
+                        crop_x2 = int(((target_pic.left + target_pic.width) / slide_width) * img_w)
+                        crop_y2 = int(((target_pic.top + target_pic.height) / slide_height) * img_h)
+
+                        # Crop visually (exact Snipping Tool behavior)
+                        cropped_img = slide_img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+
+                        out_bytes = io.BytesIO()
+                        cropped_img.save(out_bytes, format="JPEG", quality=95)
+
+                        components = []
+                        if outlet_name:
+                            components.append(clean_text(outlet_name))
+                        if contact_no:
+                            components.append(clean_text(contact_no))
+                        if media_type:
+                            components.append(clean_text(media_type))
+                        if size:
+                            components.append(clean_text(size))
+
+                        if not components:
+                            components.append(f"Store_{i+1}")
+
+                        final_name = f"{'_'.join(components)}.jpg"
+                        zip_file.writestr(final_name, out_bytes.getvalue())
+
+                    progress_bar.progress((i + 1) / total_slides)
+
+            st.success("🎉 Visual Screen Snipping Completed Successfully!")
+            st.download_button(
+                label="📥 Download Snipped Marked Images (ZIP)",
+                data=zip_buffer.getvalue(),
+                file_name="Snipped_Marked_Images.zip",
+                mime="application/zip",
+            )
