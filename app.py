@@ -1,86 +1,132 @@
-import os
-import gc
-import tempfile
-import zipfile
 import streamlit as st
-from pdf2image import convert_from_path, pdfinfo_from_path
-import subprocess
+import os
+import re
+import zipfile
+import io
+from pptx import Presentation
+from PIL import Image
+import fitz  # PyMuPDF (agar PPTX to PDF convert karke exact crop karna ho)
 
-st.set_page_config(page_title="PPT Image Extractor", layout="centered")
-st.title("✂️ PPT Image Region Extractor")
+st.set_page_config(page_title="PPT Image Extractor & Renamer", layout="wide")
 
-uploaded_file = st.file_uploader("Upload PPTX File", type=["pptx"])
+st.title("📸 PPT Image Extractor & Cropper")
+st.write("PPTX upload karein, details extract karein aur Left/Right images ko rename karke crop karein.")
 
-def pptx_to_pdf(pptx_path, output_dir):
-    """Standard headless LibreOffice command."""
-    cmd = [
-        "libreoffice",
-        "--headless",
-        "--convert-to", "pdf",
-        pptx_path,
-        "--outdir", output_dir
-    ]
-    subprocess.run(cmd, check=True)
-    pdf_name = os.path.splitext(os.path.basename(pptx_path))[0] + ".pdf"
-    return os.path.join(output_dir, pdf_name)
+# 1. Sidebar Options
+st.sidebar.header("⚙️ Options")
+image_position = st.sidebar.radio("Konsi Image Extraction chahiye?", ["Left Image", "Right Image", "Dono (Both)"])
+
+uploaded_file = st.sidebar.file_uploader("PPTX File Upload Karein", type=["pptx"])
+
+# Helper function to extract text safely
+def extract_text_from_slide(slide):
+    text_data = []
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            for paragraph in shape.text_frame.paragraphs:
+                text_data.append(paragraph.text.strip())
+    return " ".join(text_data)
+
+# Helper function to extract metadata using Regex
+def parse_slide_metadata(full_text):
+    # Default values
+    name = "UNKNOWN_NAME"
+    phone = "0000000000"
+    media_type = "NL"
+    size = "0x0"
+
+    # Extract Outlet Name
+    name_match = re.search(r"Outlet Name:\s*([^\n\r]+)", full_text, re.IGNORECASE)
+    if name_match:
+        name = name_match.group(1).split("Address:")[0].strip()
+        name = re.sub(r'[^A-Za-z0-9_]+', '_', name).upper()
+
+    # Extract Contact Number
+    phone_match = re.search(r"Contact No:\s*(\d+)", full_text, re.IGNORECASE)
+    if phone_match:
+        phone = phone_match.group(1).strip()
+
+    # Extract Type (e.g. Type: NL)
+    type_match = re.search(r"Type:\s*([A-Za-z0-9_]+)", full_text, re.IGNORECASE)
+    if type_match:
+        media_type = type_match.group(1).strip()
+
+    # Extract Size (e.g. Size: 96 x 18 -> 96x18)
+    size_match = re.search(r"Size:\s*(\d+)\s*x\s*(\d+)", full_text, re.IGNORECASE)
+    if size_match:
+        size = f"{size_match.group(1)}x{size_match.group(2)}"
+
+    return name, phone, media_type, size
 
 if uploaded_file is not None:
-    if st.button("Process & Extract Images"):
-        with st.spinner("Processing slides..."):
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Save uploaded PPTX
-                pptx_path = os.path.join(temp_dir, uploaded_file.name)
-                with open(pptx_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
+    prs = Presentation(uploaded_file)
+    total_slides = len(prs.slides)
+    st.info(f"Total Slides: {total_slides}")
 
-                try:
-                    # Convert PPTX to PDF
-                    pdf_path = pptx_to_pdf(pptx_path, temp_dir)
-                    
-                    # Get page count
-                    info = pdfinfo_from_path(pdf_path)
-                    total_pages = info["Pages"]
+    start_button = st.button("🚀 Start Image Extraction")
 
-                    extracted_images = []
+    if start_button:
+        zip_buffer = io.BytesIO()
+        processed_count = 0
 
-                    # Process 1 page at a time (RAM efficient)
-                    for page_num in range(1, total_pages + 1):
-                        images = convert_from_path(
-                            pdf_path,
-                            first_page=page_num,
-                            last_page=page_num,
-                            dpi=150,
-                            thread_count=1
-                        )
+        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            for i, slide in enumerate(prs.slides):
+                status_text.text(f"Processing Slide {i+1} of {total_slides}...")
+                
+                # Slide se text padhna
+                slide_text = extract_text_from_slide(slide)
+                name, phone, media_type, size = parse_slide_metadata(slide_text)
+
+                # Slide se images filter karna (X position ke basis par Left/Right decide karna)
+                slide_images = []
+                for shape in slide.shapes:
+                    if shape.shape_type == 13:  # 13 represents Picture shape in python-pptx
+                        slide_images.append((shape.left, shape.image))
+
+                # Left to Right sort karna
+                slide_images.sort(key=lambda x: x[0])
+
+                if len(slide_images) >= 2:
+                    left_img = slide_images[0][1]
+                    right_img = slide_images[1][1]
+
+                    # User selection ke basis par process karna
+                    targets = []
+                    if image_position in ["Left Image", "Dono (Both)"]:
+                        targets.append(("LEFT", left_img))
+                    if image_position in ["Right Image", "Dono (Both)"]:
+                        targets.append(("RIGHT", right_img))
+
+                    for pos_label, img_obj in targets:
+                        # Naya Naming Format: NAME_PHONE_MEDIATYPE_SIZE.jpg
+                        # Custom Naming format: KAILASH_SHOE_7004609398_NL_8x4.jpg
+                        file_name = f"{name}_{phone}_{media_type}_{size}.jpg"
                         
-                        if images:
-                            img = images[0]
-                            img_filename = f"slide_{page_num}.jpg"
-                            img_path = os.path.join(temp_dir, img_filename)
-                            img.save(img_path, "JPEG", quality=90)
-                            extracted_images.append((img_filename, img_path))
-                            
-                            del img
-                            del images
+                        # Agardono images le rahe hain toh distinguish karne ke liye suffix:
+                        if image_position == "Dono (Both)":
+                            file_name = f"{name}_{phone}_{media_type}_{size}_{pos_label}.jpg"
 
-                        gc.collect()
+                        img_bytes = img_obj.blob
+                        zip_file.writestr(file_name, img_bytes)
+                        processed_count += 1
+                
+                elif len(slide_images) == 1 and image_position != "Right Image":
+                    # Single image case
+                    file_name = f"{name}_{phone}_{media_type}_{size}.jpg"
+                    zip_file.writestr(file_name, slide_images[0][1].blob)
+                    processed_count += 1
 
-                    # Zip generated images
-                    zip_path = os.path.join(temp_dir, "extracted_slides.zip")
-                    with zipfile.ZipFile(zip_path, "w") as zipf:
-                        for fname, fpath in extracted_images:
-                            zipf.write(fpath, arcname=fname)
+                progress_bar.progress((i + 1) / total_slides)
 
-                    with open(zip_path, "rb") as zf:
-                        st.download_button(
-                            label="📥 Download Extracted Slides (ZIP)",
-                            data=zf.read(),
-                            file_name="extracted_slides.zip",
-                            mime="application/zip"
-                        )
-                    st.success("Extraction Complete!")
+        status_text.success(f"Processing Complete! Total {processed_count} images extracted.")
 
-                except Exception as e:
-                    st.error(f"Error processing file: {str(e)}")
-                finally:
-                    gc.collect()
+        # Download ZIP Button
+        st.download_button(
+            label="📦 Extracted Images ZIP Download Karein",
+            data=zip_buffer.getvalue(),
+            file_name="Extracted_Images.zip",
+            mime="application/zip"
+        )
