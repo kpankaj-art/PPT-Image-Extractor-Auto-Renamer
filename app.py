@@ -4,7 +4,7 @@ import tempfile
 import zipfile
 import streamlit as st
 from pptx import Presentation
-from pdf2image import convert_from_path
+from pdf2image import convert_from_path, pdfinfo_from_path
 import subprocess
 
 st.set_page_config(page_title="PPT Image Extractor", layout="centered")
@@ -35,9 +35,9 @@ if uploaded_file is not None:
                     # Convert to PDF
                     pdf_path = pptx_to_pdf(pptx_path, temp_dir)
                     
-                    # Get page count safely
-                    from pdf2image.pdf2image import _page_count
-                    total_pages = _page_count(pdf_path)
+                    # Get page count safely using pdfinfo_from_path
+                    info = pdfinfo_from_path(pdf_path)
+                    total_pages = info["Pages"]
 
                     extracted_images = []
 
