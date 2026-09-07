@@ -1,12 +1,13 @@
 import io
 import re
 import zipfile
-from pptx import Presentation
 import streamlit as st
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="PPT Visual Extractor", page_icon="🖼️", layout="wide")
-st.title("🖼️ PPT Image Extractor (Marking Fixed)")
+st.title("🖼️ PPT Visual Image Extractor (Deep Group Scan Engine)")
 
 image_option = st.radio(
     "Select Image to Export:",
@@ -23,6 +24,7 @@ def clean_text(text):
 
 def extract_info_from_slide(slide):
     all_text_blocks = []
+    
     def collect_text(shapes):
         for shape in shapes:
             if shape.has_text_frame and shape.text_frame.text.strip():
@@ -32,7 +34,7 @@ def extract_info_from_slide(slide):
                     for cell in row.cells:
                         if cell.text.strip():
                             all_text_blocks.append(cell.text.strip())
-            if getattr(shape, "shape_type", None) == 6:
+            if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
                 collect_text(shape.shapes)
 
     collect_text(slide.shapes)
@@ -87,11 +89,21 @@ def extract_info_from_slide(slide):
 
     return outlet_name, contact_no, media_type, size
 
+def get_all_flattened_shapes(shape_list):
+    """Recursively unpacks Grouped shapes into a flat list"""
+    flat = []
+    for s in shape_list:
+        if s.shape_type == MSO_SHAPE_TYPE.GROUP:
+            flat.extend(get_all_flattened_shapes(s.shapes))
+        else:
+            flat.append(s)
+    return flat
+
 def draw_precise_overlay(slide, target_pic):
     image_bytes = target_pic.image.blob
     pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     
-    # Handle PPT Crop ratios
+    # Check PPT cropping properties
     crop_left = getattr(target_pic, 'crop_left', 0) or 0
     crop_top = getattr(target_pic, 'crop_top', 0) or 0
     crop_right = getattr(target_pic, 'crop_right', 0) or 0
@@ -99,7 +111,6 @@ def draw_precise_overlay(slide, target_pic):
 
     orig_w, orig_h = pil_img.size
 
-    # Crop original image according to PPT picture cropping
     left_px = int(crop_left * orig_w)
     top_px = int(crop_top * orig_h)
     right_px = int((1 - crop_right) * orig_w)
@@ -110,23 +121,30 @@ def draw_precise_overlay(slide, target_pic):
 
     img_w, img_h = pil_img.size
     draw = ImageDraw.Draw(pil_img)
-    line_thickness = max(4, int(min(img_w, img_h) * 0.012))
+    line_thickness = max(5, int(min(img_w, img_h) * 0.015))
 
     pic_left, pic_top = target_pic.left, target_pic.top
     pic_w, pic_h = target_pic.width, target_pic.height
 
-    for shape in slide.shapes:
-        if shape == target_pic or (shape.has_text_frame and len(shape.text_frame.text.strip()) > 2):
+    # Deep scan all nested/grouped shapes
+    all_shapes = get_all_flattened_shapes(slide.shapes)
+
+    for shape in all_shapes:
+        if shape == target_pic:
+            continue
+
+        # Skip full text boxes
+        if shape.has_text_frame and len(shape.text_frame.text.strip()) > 2:
             continue
 
         s_left, s_top = shape.left, shape.top
         s_w, s_h = shape.width, shape.height
 
-        # Filter large frame borders
+        # Ignore slide background frames
         if s_w >= pic_w * 0.85 and s_h >= pic_h * 0.85:
             continue
 
-        # Overlap check with picture frame on slide
+        # Check overlapping coordinates
         if (s_left + s_w > pic_left and s_left < pic_left + pic_w and
             s_top + s_h > pic_top and s_top < pic_top + pic_h):
 
@@ -138,7 +156,7 @@ def draw_precise_overlay(slide, target_pic):
             px1, py1 = int(rel_x1 * img_w), int(rel_y1 * img_h)
             px2, py2 = int(rel_x2 * img_w), int(rel_y2 * img_h)
 
-            if abs(px2 - px1) > 2 and abs(py2 - py1) > 2:
+            if abs(px2 - px1) > 1 and abs(py2 - py1) > 1:
                 for off in range(line_thickness):
                     draw.rectangle([px1 - off, py1 - off, px2 + off, py2 + off], outline="#FF0000")
 
@@ -159,9 +177,10 @@ if uploaded_file is not None:
             for i, slide in enumerate(prs.slides):
                 outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
 
+                all_shapes = get_all_flattened_shapes(slide.shapes)
                 pic_shapes = [
-                    s for s in slide.shapes
-                    if (getattr(s, "shape_type", None) == 13 or hasattr(s, "image"))
+                    s for s in all_shapes
+                    if (s.shape_type == MSO_SHAPE_TYPE.PICTURE or hasattr(s, "image"))
                     and s.width > 1000000
                 ]
                 pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
@@ -188,10 +207,10 @@ if uploaded_file is not None:
 
                 progress_bar.progress((i + 1) / total_slides)
 
-        st.success("🎉 Processing Finished!")
+        st.success("🎉 Processing Complete!")
         st.download_button(
             label="📥 Download Fixed Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Fixed_Marked_Images.zip",
+            file_name="DeepScan_Marked_Images.zip",
             mime="application/zip",
         )
