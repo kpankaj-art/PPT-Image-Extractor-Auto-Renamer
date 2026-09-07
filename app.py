@@ -8,8 +8,7 @@ from PIL import Image, ImageDraw
 st.set_page_config(
     page_title="PPT Visual Marking Image Extractor", page_icon="🖼️", layout="wide"
 )
-st.title("🖼️ PPT Visual Image Extractor (Multi-Color Marking Support)")
-st.caption("Extracts images and detects ALL overlay shape colors (Red, Orange, Yellow, Blue, Green, etc.).")
+st.title("🖼️ PPT Visual Image Extractor (Marking Fixed)")
 
 image_option = st.radio(
     "Select Image to Export:",
@@ -38,7 +37,7 @@ def extract_info_from_slide(slide, slide_num):
                     for cell in row.cells:
                         if cell.text.strip():
                             all_text_blocks.append(cell.text.strip())
-            if getattr(shape, "shape_type", None) == 6:  # Group shape
+            if getattr(shape, "shape_type", None) == 6:
                 collect_text(shape.shapes)
 
     collect_text(slide.shapes)
@@ -94,23 +93,8 @@ def extract_info_from_slide(slide, slide_num):
     return outlet_name, contact_no, media_type, size
 
 
-def get_shape_color(shape):
-    """Extracts exact outline color of shape or defaults to bright red if undetected"""
-    try:
-        if hasattr(shape, "line") and shape.line.color and shape.line.color.rgb:
-            rgb = shape.line.color.rgb
-            return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-        elif hasattr(shape, "fill") and shape.fill.fore_color and shape.fill.fore_color.rgb:
-            rgb = shape.fill.fore_color.rgb
-            return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-    except Exception:
-        pass
-    # Fallback to standard Red if PPT line theme isn't explicitly defined
-    return "#FF0000"
-
-
 def draw_markings_on_target_image(slide, target_pic):
-    """Detects and overlays any colored box shape (Red, Yellow, Blue, Orange, etc.) over the target image"""
+    """Guaranteed overlay extraction for all marking box shapes"""
     image_bytes = target_pic.image.blob
     pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     img_w, img_h = pil_img.size
@@ -121,37 +105,31 @@ def draw_markings_on_target_image(slide, target_pic):
     pic_h = target_pic.height
 
     draw = ImageDraw.Draw(pil_img)
-    line_thickness = max(4, int(min(img_w, img_h) * 0.01))
+    line_thickness = max(4, int(min(img_w, img_h) * 0.012))
 
     for shape in slide.shapes:
         if shape == target_pic:
             continue
 
-        # Skip text blocks and layout containers
-        if shape.has_text_frame and len(shape.text_frame.text.strip()) > 0:
+        # Ignore shapes with full text labels
+        if shape.has_text_frame and len(shape.text_frame.text.strip()) > 2:
             continue
 
         s_left, s_top = shape.left, shape.top
         s_w, s_h = shape.width, shape.height
 
-        # Ignore outer background borders
-        if s_w >= pic_w * 0.9 and s_h >= pic_h * 0.9:
+        # Ignore main border blue frames & full background frames
+        if s_w >= pic_w * 0.85 and s_h >= pic_h * 0.85:
             continue
 
-        s_cx = s_left + (s_w / 2)
-        s_cy = s_top + (s_h / 2)
-
-        # Check if shape center falls over target image
-        is_overlapping = (
-            pic_left - 100000 <= s_cx <= pic_left + pic_w + 100000
-            and pic_top - 100000 <= s_cy <= pic_top + pic_h + 100000
-        )
-
-        if is_overlapping and s_w > 0 and s_h > 0:
-            # Detect shape's original border color dynamically
-            stroke_color = get_shape_color(shape)
-
-            # Map relative coordinates onto photo pixels
+        # Check if shape lies over target photo region
+        if (
+            s_left + s_w > pic_left
+            and s_left < pic_left + pic_w
+            and s_top + s_h > pic_top
+            and s_top < pic_top + pic_h
+        ):
+            # Calculate pixel bounds on image
             rel_x1 = max(0.0, min(1.0, (s_left - pic_left) / pic_w))
             rel_y1 = max(0.0, min(1.0, (s_top - pic_top) / pic_h))
             rel_x2 = max(0.0, min(1.0, (s_left + s_w - pic_left) / pic_w))
@@ -161,11 +139,11 @@ def draw_markings_on_target_image(slide, target_pic):
             px2, py2 = int(rel_x2 * img_w), int(rel_y2 * img_h)
 
             if abs(px2 - px1) > 2 and abs(py2 - py1) > 2:
-                # Draw box in its native detected color
+                # Draw high-visibility Red Box over the exact spot
                 for off in range(line_thickness):
                     draw.rectangle(
                         [px1 - off, py1 - off, px2 + off, py2 + off],
-                        outline=stroke_color,
+                        outline="#FF0000",
                     )
 
     out = io.BytesIO()
@@ -189,22 +167,19 @@ if uploaded_file is not None:
                     slide, i + 1
                 )
 
-                # Filter valid picture shapes sorted left to right
+                # Filter real picture shapes (width check eliminates empty blue frames)
                 pic_shapes = [
                     s
                     for s in slide.shapes
                     if (getattr(s, "shape_type", None) == 13 or hasattr(s, "image"))
-                    and s.width > 500000
+                    and s.width > 1000000
                 ]
                 pic_shapes = sorted(pic_shapes, key=lambda s: s.left)
 
                 if pic_shapes:
-                    if "Image 2" in image_option or len(pic_shapes) == 1:
-                        target_pic = pic_shapes[-1]
-                    else:
-                        target_pic = pic_shapes[0]
+                    target_pic = pic_shapes[-1]
 
-                    # Overlay markings (any color)
+                    # Burn red box marking directly on image
                     final_bytes = draw_markings_on_target_image(slide, target_pic)
 
                     components = []
@@ -225,10 +200,10 @@ if uploaded_file is not None:
 
                 progress_bar.progress((i + 1) / total_slides)
 
-        st.success("🎉 Extraction Completed with Multi-Color Markings!")
+        st.success("🎉 Extraction Finished!")
         st.download_button(
-            label="📥 Download Extracted Images (ZIP)",
+            label="📥 Download Fixed Marked Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Marked_Images_MultiColor.zip",
+            file_name="Final_Marked_Images.zip",
             mime="application/zip",
         )
