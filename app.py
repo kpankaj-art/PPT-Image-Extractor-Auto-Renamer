@@ -1,8 +1,7 @@
 import io
-import os
 import re
 import zipfile
-import aspose.slides as slides
+import aspose.slides.cpp as slides
 from pptx import Presentation
 import streamlit as st
 from PIL import Image
@@ -103,9 +102,7 @@ def extract_info_from_slide(slide):
 
 
 def render_and_crop(aspose_slide, pic_shape, slide_width_emu, slide_height_emu):
-    """Slide ko full image render karke exact image shape bounding box par crop karta hai"""
-    # 1. Slide Image Render
-    bmp = aspose_slide.get_image(2.0, 2.0)  # High resolution 2x scale
+    bmp = aspose_slide.get_image(2.0, 2.0)
     img_bytes = io.BytesIO()
     bmp.save(img_bytes, slides.image_format.JPEG)
     img_bytes.seek(0)
@@ -113,7 +110,6 @@ def render_and_crop(aspose_slide, pic_shape, slide_width_emu, slide_height_emu):
     pil_slide = Image.open(img_bytes)
     slide_pixel_w, slide_pixel_h = pil_slide.size
 
-    # 2. Scale Coordinates
     scale_x = slide_pixel_w / slide_width_emu
     scale_y = slide_pixel_h / slide_height_emu
 
@@ -122,7 +118,6 @@ def render_and_crop(aspose_slide, pic_shape, slide_width_emu, slide_height_emu):
     right = int((pic_shape.left + pic_shape.width) * scale_x)
     bottom = int((pic_shape.top + pic_shape.height) * scale_y)
 
-    # 3. Crop Exact Image Area
     cropped_img = pil_slide.crop((left, top, right, bottom))
 
     out_bytes = io.BytesIO()
@@ -131,13 +126,11 @@ def render_and_crop(aspose_slide, pic_shape, slide_width_emu, slide_height_emu):
 
 
 if uploaded_file is not None:
-    # Read PPT via python-pptx for info & positions
     file_bytes = uploaded_file.read()
     prs = Presentation(io.BytesIO(file_bytes))
     total_slides = len(prs.slides)
     st.sidebar.success(f"Total Slides: {total_slides}")
 
-    # Read PPT via Aspose for Rendering
     aspose_prs = slides.Presentation(io.BytesIO(file_bytes))
 
     slide_width_emu = prs.slide_width
@@ -153,7 +146,6 @@ if uploaded_file is not None:
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
                     aspose_slide = aspose_prs.slides[i]
 
-                    # Picture shapes
                     pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
 
                     if pic_shapes:
@@ -186,7 +178,6 @@ if uploaded_file is not None:
                             base_filename = "_".join(components) + suffix
                             final_name = f"{base_filename}.jpg"
 
-                            # Render full slide & crop red marked image
                             cropped_data = render_and_crop(
                                 aspose_slide, pic, slide_width_emu, slide_height_emu
                             )
