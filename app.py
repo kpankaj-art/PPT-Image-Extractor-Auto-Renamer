@@ -1,18 +1,14 @@
-import gc
 import io
-import os
 import re
-import subprocess
 import zipfile
 from pptx import Presentation
 import streamlit as st
-from PIL import Image
-from pdf2image import convert_from_path
+from PIL import Image, ImageDraw
 
 st.set_page_config(
     page_title="PPT Image Extractor with Marking", page_icon="🖼️", layout="wide"
 )
-st.title("🖼️ PPT Image Extractor (Red Box Merged - Low Memory Engine)")
+st.title("🖼️ PPT Image Extractor (Red Box Marking)")
 st.write("Format: **OutletName_MobileNo_Type_Size.jpg**")
 
 image_position = st.sidebar.radio(
@@ -103,85 +99,56 @@ def extract_info_from_slide(slide):
     return outlet_name, contact_no, media_type, size
 
 
-def process_single_slide_render(slide_index, prs, pptx_bytes):
-    """Processes 1 slide at a time to prevent RAM Out of Memory Crash"""
-    # Create temporary 1-slide presentation to render
-    temp_prs = Presentation()
-    temp_prs.slide_width = prs.slide_width
-    temp_prs.slide_height = prs.slide_height
+def process_image_with_marking(pic_shape, slide):
+    """Overlay Shapes ko Picture Coordinates par Mapping karke Permanent Draw karta hai"""
+    image_bytes = io.BytesIO(pic_shape.image.blob)
+    pil_img = Image.open(image_bytes).convert("RGB")
+    draw = ImageDraw.Draw(pil_img)
 
-    # Save temp single slide pptx
-    temp_pptx = f"temp_slide_{slide_index}.pptx"
-    temp_pdf = f"temp_slide_{slide_index}.pdf"
+    pic_left = pic_shape.left
+    pic_top = pic_shape.top
+    pic_width = pic_shape.width
+    pic_height = pic_shape.height
 
-    # Save main file
-    with open(temp_pptx, "wb") as f:
-        f.write(pptx_bytes)
+    img_w, img_h = pil_img.size
 
-    try:
-        # Convert PPTX to PDF using LibreOffice
-        subprocess.run(
-            ["libreoffice", "--headless", "--convert-to", "pdf", temp_pptx],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
-        )
+    for shape in slide.shapes:
+        # Visual Red Box shapes
+        if shape != pic_shape and shape.shape_type != 13:
+            s_left = shape.left
+            s_top = shape.top
+            s_right = shape.left + shape.width
+            s_bottom = shape.top + shape.height
+            
+            p_right = pic_left + pic_width
+            p_bottom = pic_top + pic_height
 
-        # Convert specific slide page from PDF to PIL Image (Low DPI to save memory)
-        slide_images = convert_from_path(
-            temp_pdf,
-            first_page=slide_index + 1,
-            last_page=slide_index + 1,
-            dpi=150
-        )
-        rendered_slide_img = slide_images[0] if slide_images else None
-    except Exception:
-        rendered_slide_img = None
-    finally:
-        # CLEANUP DISK & RAM AFTER EACH SLIDE
-        if os.path.exists(temp_pptx):
-            os.remove(temp_pptx)
-        if os.path.exists(temp_pdf):
-            os.remove(temp_pdf)
-        gc.collect()
+            # Overlap check
+            if not (s_right < pic_left or s_left > p_right or s_bottom < pic_top or s_top > p_bottom):
+                rel_x1 = max(0, int(((s_left - pic_left) / pic_width) * img_w))
+                rel_y1 = max(0, int(((s_top - pic_top) / pic_height) * img_h))
+                rel_x2 = min(img_w, int(((s_right - pic_left) / pic_width) * img_w))
+                rel_y2 = min(img_h, int(((s_bottom - pic_top) / pic_height) * img_h))
 
-    return rendered_slide_img
+                if rel_x2 > rel_x1 and rel_y2 > rel_y1:
+                    line_thickness = max(8, int(img_w / 70))
+                    draw.rectangle(
+                        [rel_x1, rel_y1, rel_x2, rel_y2],
+                        outline="red",
+                        width=line_thickness,
+                    )
 
-
-def crop_picture_from_slide_image(slide_img, pic_shape, prs_width, prs_height):
-    """Crops the exact picture area from full rendered slide"""
-    img_w, img_h = slide_img.size
-
-    left_ratio = pic_shape.left / prs_width
-    top_ratio = pic_shape.top / prs_height
-    width_ratio = pic_shape.width / prs_width
-    height_ratio = pic_shape.height / prs_height
-
-    crop_x1 = int(left_ratio * img_w)
-    crop_y1 = int(top_ratio * img_h)
-    crop_x2 = int((left_ratio + width_ratio) * img_w)
-    crop_y2 = int((top_ratio + height_ratio) * img_h)
-
-    cropped_img = slide_img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
-
-    out_b = io.BytesIO()
-    cropped_img.save(out_b, format="JPEG", quality=90)
-    
-    # Cleanup memory
-    cropped_img.close()
-    del cropped_img
-    gc.collect()
-
-    return out_b.getvalue()
+    out_bytes = io.BytesIO()
+    pil_img.save(out_bytes, format="JPEG", quality=95)
+    return out_bytes.getvalue()
 
 
 if uploaded_file is not None:
-    file_bytes = uploaded_file.getvalue()
-    prs = Presentation(io.BytesIO(file_bytes))
+    prs = Presentation(uploaded_file)
     total_slides = len(prs.slides)
     st.sidebar.success(f"Total Slides: {total_slides}")
 
-    if st.button("🚀 Start Extraction & Merge Markings"):
+    if st.button("🚀 Start Extraction & Draw Red Marking"):
         zip_buffer = io.BytesIO()
         processed_count = 0
 
@@ -190,7 +157,7 @@ if uploaded_file is not None:
 
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             for i, slide in enumerate(prs.slides):
-                status_text.text(f"Processing Slide {i+1} of {total_slides} (Memory Auto-Clean)...")
+                status_text.text(f"Processing Slide {i+1} of {total_slides}...")
                 progress_bar.progress((i + 1) / total_slides)
 
                 outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
@@ -202,50 +169,36 @@ if uploaded_file is not None:
                     if not outlet_name:
                         outlet_name = f"SLIDE_{i+1}"
 
-                    # Process render ONLY for current slide
-                    slide_img = process_single_slide_render(i, prs, file_bytes)
+                    targets = []
+                    if image_position == "Left Image" and len(pic_shapes) >= 1:
+                        targets.append(("", pic_shapes[0]))
+                    elif image_position == "Right Image":
+                        right_pic = pic_shapes[1] if len(pic_shapes) >= 2 else pic_shapes[0]
+                        targets.append(("", right_pic))
+                    elif image_position == "Dono (Both)":
+                        if len(pic_shapes) >= 1:
+                            targets.append(("_LEFT", pic_shapes[0]))
+                        if len(pic_shapes) >= 2:
+                            targets.append(("_RIGHT", pic_shapes[1]))
 
-                    if slide_img:
-                        targets = []
-                        if image_position == "Left Image" and len(pic_shapes) >= 1:
-                            targets.append(("", pic_shapes[0]))
-                        elif image_position == "Right Image":
-                            right_pic = pic_shapes[1] if len(pic_shapes) >= 2 else pic_shapes[0]
-                            targets.append(("", right_pic))
-                        elif image_position == "Dono (Both)":
-                            if len(pic_shapes) >= 1:
-                                targets.append(("_LEFT", pic_shapes[0]))
-                            if len(pic_shapes) >= 2:
-                                targets.append(("_RIGHT", pic_shapes[1]))
+                    for suffix, pic in targets:
+                        components = [outlet_name]
+                        if contact_no:
+                            components.append(contact_no)
+                        if media_type:
+                            components.append(media_type)
+                        if size:
+                            components.append(size)
 
-                        for suffix, pic in targets:
-                            components = [outlet_name]
-                            if contact_no:
-                                components.append(contact_no)
-                            if media_type:
-                                components.append(media_type)
-                            if size:
-                                components.append(size)
+                        base_filename = "_".join(components) + suffix
+                        final_name = f"{base_filename}.jpg"
 
-                            base_filename = "_".join(components) + suffix
-                            final_name = f"{base_filename}.jpg"
-
-                            final_data = crop_picture_from_slide_image(
-                                slide_img,
-                                pic,
-                                prs.slide_width,
-                                prs.slide_height,
-                            )
-                            zip_file.writestr(final_name, final_data)
-                            processed_count += 1
-
-                        # Close image object and force GC
-                        slide_img.close()
-                        del slide_img
-                        gc.collect()
+                        final_image_data = process_image_with_marking(pic, slide)
+                        zip_file.writestr(final_name, final_image_data)
+                        processed_count += 1
 
         status_text.text("Processing Complete!")
-        st.success(f"🎉 Success! Extracted {processed_count} images with Red Box merged.")
+        st.success(f"🎉 Success! Extracted {processed_count} images with Red Box marking.")
         st.download_button(
             label="📥 Download Renamed Images (ZIP)",
             data=zip_buffer.getvalue(),
