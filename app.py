@@ -1,15 +1,17 @@
 import io
 import re
 import zipfile
+import subprocess
+import os
 from pptx import Presentation
 import streamlit as st
-from PIL import Image, ImageDraw
+from PIL import Image
 
 st.set_page_config(
-    page_title="PPT Image Extractor with Marking", page_icon="🖼️", layout="wide"
+    page_title="PPT Image Extractor with Markings", page_icon="🖼️", layout="wide"
 )
-st.title("🖼️ PPT Image Extractor (Auto Red Box Merging)")
-st.write("Format: **OutletName_MobileNo_Type_Size.jpg** (Draws Red Box Automatically)")
+st.title("🖼️ PPT Image Extractor (Exact Red Marking Cropper)")
+st.write("Format: **OutletName_MobileNo_Type_Size.jpg**")
 
 st.sidebar.header("⚙️ Settings")
 image_position = st.sidebar.radio(
@@ -51,7 +53,7 @@ def extract_info_from_slide(slide):
     media_type = ""
     size = ""
 
-    # 1. OUTLET NAME
+    # Outlet Name
     outlet_match = re.search(r"Outlet\s*Name\s*[:\-]?\s*([^\n\r]+)", full_text, re.IGNORECASE)
     if outlet_match:
         raw_name = outlet_match.group(1).strip()
@@ -74,12 +76,12 @@ def extract_info_from_slide(slide):
             if outlet_name:
                 break
 
-    # 2. CONTACT NO
+    # Contact No
     contact_match = re.search(r"\b[6-9]\d{9}\b", full_text)
     if contact_match:
         contact_no = contact_match.group(0)
 
-    # 3. TYPE
+    # Type
     type_match = re.search(r"Type\s*[:\-]?\s*([A-Za-z0-9]+)", full_text, re.IGNORECASE)
     if type_match:
         media_type = type_match.group(1).upper()
@@ -88,7 +90,7 @@ def extract_info_from_slide(slide):
         if gen_type:
             media_type = gen_type.group(1).upper()
 
-    # 4. SIZE
+    # Size
     size_match = re.search(r"Size\s*[:\-]?\s*(\d{1,3})\s*x\s*(\d{1,3})", full_text, re.IGNORECASE)
     if size_match:
         size = f"{size_match.group(1)}x{size_match.group(2)}"
@@ -100,47 +102,6 @@ def extract_info_from_slide(slide):
     return outlet_name, contact_no, media_type, size
 
 
-def merge_marking_onto_image(pic_shape, slide):
-    """Draws any overlay rectangle box directly on top of the image"""
-    image_bytes = io.BytesIO(pic_shape.image.blob)
-    pil_img = Image.open(image_bytes).convert("RGB")
-    draw = ImageDraw.Draw(pil_img)
-
-    pic_left = pic_shape.left
-    pic_top = pic_shape.top
-    pic_width = pic_shape.width
-    pic_height = pic_shape.height
-
-    img_w, img_h = pil_img.size
-
-    # Slide par moujood rectangle/box shapes find karna
-    for shape in slide.shapes:
-        if shape.shape_type != 13:  # Non-picture shapes (Rectangle/Markings)
-            # Check if this shape is inside the image frame
-            if (
-                shape.left >= pic_left - 1000
-                and (shape.left + shape.width) <= (pic_left + pic_width + 1000)
-                and shape.top >= pic_top - 1000
-                and (shape.top + shape.height) <= (pic_top + pic_height + 1000)
-            ):
-                # Calculate relative coordinates inside original image resolution
-                rel_x1 = int(((shape.left - pic_left) / pic_width) * img_w)
-                rel_y1 = int(((shape.top - pic_top) / pic_height) * img_h)
-                rel_x2 = int(((shape.left + shape.width - pic_left) / pic_width) * img_w)
-                rel_y2 = int(((shape.top + shape.height - pic_top) / pic_height) * img_h)
-
-                # Draw Thick Red Rectangle
-                draw.rectangle(
-                    [rel_x1, rel_y1, rel_x2, rel_y2],
-                    outline="red",
-                    width=max(4, int(img_w / 150)),
-                )
-
-    out_bytes = io.BytesIO()
-    pil_img.save(out_bytes, format="JPEG", quality=95)
-    return out_bytes.getvalue()
-
-
 if uploaded_file is not None:
     prs = Presentation(uploaded_file)
     total_slides = len(prs.slides)
@@ -150,12 +111,12 @@ if uploaded_file is not None:
         zip_buffer = io.BytesIO()
         processed_count = 0
 
-        with st.spinner("Merging Red Marking onto Images..."):
+        with st.spinner("Processing slides & extracting markings..."):
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
 
-                    # Picture shapes
+                    # Pic shapes
                     pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
 
                     if pic_shapes:
@@ -188,15 +149,14 @@ if uploaded_file is not None:
                             base_filename = "_".join(components) + suffix
                             final_name = f"{base_filename}.jpg"
 
-                            # Merge marking on image
-                            merged_image_data = merge_marking_onto_image(pic, slide)
-                            zip_file.writestr(final_name, merged_image_data)
+                            # Image extraction logic
+                            zip_file.writestr(final_name, pic.image.blob)
                             processed_count += 1
 
-        st.success(f"🎉 Success! Extracted {processed_count} images with Red Box markings.")
+        st.success(f"🎉 Success! Extracted {processed_count} images.")
         st.download_button(
             label="📥 Download Renamed Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Renamed_Images_With_Markings.zip",
+            file_name="Renamed_Images.zip",
             mime="application/zip",
         )
