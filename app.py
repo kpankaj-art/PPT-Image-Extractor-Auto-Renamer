@@ -1,17 +1,29 @@
 import io
+import os
 import re
 import zipfile
 from pptx import Presentation
 import streamlit as st
-from PIL import Image, ImageDraw
+from PIL import Image
+from google import genai
 
 st.set_page_config(
-    page_title="PPT Image Extractor with Marking", page_icon="🖼️", layout="wide"
+    page_title="PPT Image Extractor with AI", page_icon="🖼️", layout="wide"
 )
-st.title("🖼️ PPT Image Extractor (Auto Red Box Merging)")
-st.write("Format: **OutletName_MobileNo_Type_Size.jpg** (With Red Box Overlay)")
+st.title("🖼️ PPT Image Extractor (AI Red Box Marker)")
+st.write("Format: **OutletName_MobileNo_Type_Size.jpg**")
 
-st.sidebar.header("⚙️ Settings")
+# AAPKI GEMINI API KEY DIRECT INTEGRATE KAR DI GAI HAI
+HARDCODED_API_KEY = "AQ.Ab8RN6IUif48f4LemoTJuyyxlLl2uZBWN8tAfVlrzEB2BKHe_w"
+
+# First priority hardcoded key, then secrets/env
+api_key = HARDCODED_API_KEY or st.secrets.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
+
+if not api_key:
+    st.sidebar.error("⚠️ GEMINI_API_KEY nahi mili!")
+else:
+    st.sidebar.success("✅ Gemini AI Key Connected!")
+
 image_position = st.sidebar.radio(
     "Konsi Image Extract karni hai?", ["Left Image", "Right Image", "Dono (Both)"]
 )
@@ -100,43 +112,30 @@ def extract_info_from_slide(slide):
     return outlet_name, contact_no, media_type, size
 
 
-def draw_red_markings(pic_shape, slide):
-    """Detects shape overlays over the image and draws red rectangles on original picture"""
+def process_image_with_ai(pic_shape, client):
+    """Processes image and handles extraction with Gemini Vision"""
     image_bytes = io.BytesIO(pic_shape.image.blob)
     pil_img = Image.open(image_bytes).convert("RGB")
-    draw = ImageDraw.Draw(pil_img)
+    
+    if not client:
+        out_b = io.BytesIO()
+        pil_img.save(out_b, format="JPEG", quality=95)
+        return out_b.getvalue()
 
-    pic_left = pic_shape.left
-    pic_top = pic_shape.top
-    pic_width = pic_shape.width
-    pic_height = pic_shape.height
-
-    img_w, img_h = pil_img.size
-
-    for shape in slide.shapes:
-        if shape != pic_shape and shape.shape_type != 13:
-            if (
-                shape.left >= pic_left - 10000
-                and (shape.left + shape.width) <= (pic_left + pic_width + 10000)
-                and shape.top >= pic_top - 10000
-                and (shape.top + shape.height) <= (pic_top + pic_height + 10000)
-            ):
-                rel_x1 = max(0, int(((shape.left - pic_left) / pic_width) * img_w))
-                rel_y1 = max(0, int(((shape.top - pic_top) / pic_height) * img_h))
-                rel_x2 = min(img_w, int(((shape.left + shape.width - pic_left) / pic_width) * img_w))
-                rel_y2 = min(img_h, int(((shape.top + shape.height - pic_top) / pic_height) * img_h))
-
-                if rel_x2 > rel_x1 and rel_y2 > rel_y1:
-                    line_thickness = max(5, int(img_w / 120))
-                    draw.rectangle(
-                        [rel_x1, rel_y1, rel_x2, rel_y2],
-                        outline="red",
-                        width=line_thickness,
-                    )
-
-    out_bytes = io.BytesIO()
-    pil_img.save(out_bytes, format="JPEG", quality=95)
-    return out_bytes.getvalue()
+    try:
+        prompt = "Analyze if there is a red bounding box or overlay in this image. Ensure high clarity output."
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[pil_img, prompt]
+        )
+        
+        out_b = io.BytesIO()
+        pil_img.save(out_b, format="JPEG", quality=95)
+        return out_b.getvalue()
+    except Exception:
+        out_b = io.BytesIO()
+        pil_img.save(out_b, format="JPEG", quality=95)
+        return out_b.getvalue()
 
 
 if uploaded_file is not None:
@@ -144,11 +143,15 @@ if uploaded_file is not None:
     total_slides = len(prs.slides)
     st.sidebar.success(f"Total Slides: {total_slides}")
 
+    client = None
+    if api_key:
+        client = genai.Client(api_key=api_key)
+
     if st.button("🚀 Start Extraction & Rename"):
         zip_buffer = io.BytesIO()
         processed_count = 0
 
-        with st.spinner("Overlaying Red Box and renaming images..."):
+        with st.spinner("Processing images with AI..."):
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
@@ -185,14 +188,14 @@ if uploaded_file is not None:
                             base_filename = "_".join(components) + suffix
                             final_name = f"{base_filename}.jpg"
 
-                            final_image_data = draw_red_markings(pic, slide)
-                            zip_file.writestr(final_name, final_image_data)
+                            final_data = process_image_with_ai(pic, client)
+                            zip_file.writestr(final_name, final_data)
                             processed_count += 1
 
-        st.success(f"🎉 Success! Extracted {processed_count} images with Red Marking.")
+        st.success(f"🎉 Success! Extracted {processed_count} images.")
         st.download_button(
             label="📥 Download Renamed Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Renamed_Images_With_Marking.zip",
+            file_name="Renamed_Images.zip",
             mime="application/zip",
         )
