@@ -1,17 +1,17 @@
 import io
+import os
 import re
 import zipfile
-import subprocess
-import os
+import aspose.slides as slides
 from pptx import Presentation
 import streamlit as st
 from PIL import Image
 
 st.set_page_config(
-    page_title="PPT Image Extractor with Markings", page_icon="🖼️", layout="wide"
+    page_title="PPT Image Extractor with Marking", page_icon="🖼️", layout="wide"
 )
 st.title("🖼️ PPT Image Extractor (Exact Red Marking Cropper)")
-st.write("Format: **OutletName_MobileNo_Type_Size.jpg**")
+st.write("Format: **OutletName_MobileNo_Type_Size.jpg** (With Exact Red Markings)")
 
 st.sidebar.header("⚙️ Settings")
 image_position = st.sidebar.radio(
@@ -53,7 +53,7 @@ def extract_info_from_slide(slide):
     media_type = ""
     size = ""
 
-    # Outlet Name
+    # 1. OUTLET NAME
     outlet_match = re.search(r"Outlet\s*Name\s*[:\-]?\s*([^\n\r]+)", full_text, re.IGNORECASE)
     if outlet_match:
         raw_name = outlet_match.group(1).strip()
@@ -76,12 +76,12 @@ def extract_info_from_slide(slide):
             if outlet_name:
                 break
 
-    # Contact No
+    # 2. CONTACT NO
     contact_match = re.search(r"\b[6-9]\d{9}\b", full_text)
     if contact_match:
         contact_no = contact_match.group(0)
 
-    # Type
+    # 3. TYPE
     type_match = re.search(r"Type\s*[:\-]?\s*([A-Za-z0-9]+)", full_text, re.IGNORECASE)
     if type_match:
         media_type = type_match.group(1).upper()
@@ -90,7 +90,7 @@ def extract_info_from_slide(slide):
         if gen_type:
             media_type = gen_type.group(1).upper()
 
-    # Size
+    # 4. SIZE
     size_match = re.search(r"Size\s*[:\-]?\s*(\d{1,3})\s*x\s*(\d{1,3})", full_text, re.IGNORECASE)
     if size_match:
         size = f"{size_match.group(1)}x{size_match.group(2)}"
@@ -102,21 +102,58 @@ def extract_info_from_slide(slide):
     return outlet_name, contact_no, media_type, size
 
 
+def render_and_crop(aspose_slide, pic_shape, slide_width_emu, slide_height_emu):
+    """Slide ko full image render karke exact image shape bounding box par crop karta hai"""
+    # 1. Slide Image Render
+    bmp = aspose_slide.get_image(2.0, 2.0)  # High resolution 2x scale
+    img_bytes = io.BytesIO()
+    bmp.save(img_bytes, slides.image_format.JPEG)
+    img_bytes.seek(0)
+
+    pil_slide = Image.open(img_bytes)
+    slide_pixel_w, slide_pixel_h = pil_slide.size
+
+    # 2. Scale Coordinates
+    scale_x = slide_pixel_w / slide_width_emu
+    scale_y = slide_pixel_h / slide_height_emu
+
+    left = int(pic_shape.left * scale_x)
+    top = int(pic_shape.top * scale_y)
+    right = int((pic_shape.left + pic_shape.width) * scale_x)
+    bottom = int((pic_shape.top + pic_shape.height) * scale_y)
+
+    # 3. Crop Exact Image Area
+    cropped_img = pil_slide.crop((left, top, right, bottom))
+
+    out_bytes = io.BytesIO()
+    cropped_img.save(out_bytes, format="JPEG", quality=95)
+    return out_bytes.getvalue()
+
+
 if uploaded_file is not None:
-    prs = Presentation(uploaded_file)
+    # Read PPT via python-pptx for info & positions
+    file_bytes = uploaded_file.read()
+    prs = Presentation(io.BytesIO(file_bytes))
     total_slides = len(prs.slides)
     st.sidebar.success(f"Total Slides: {total_slides}")
 
-    if st.button("🚀 Start Extraction & Rename"):
+    # Read PPT via Aspose for Rendering
+    aspose_prs = slides.Presentation(io.BytesIO(file_bytes))
+
+    slide_width_emu = prs.slide_width
+    slide_height_emu = prs.slide_height
+
+    if st.button("🚀 Start Crop Extraction (With Red Box)"):
         zip_buffer = io.BytesIO()
         processed_count = 0
 
-        with st.spinner("Processing slides & extracting markings..."):
+        with st.spinner("Rendering slides and cropping marked images..."):
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
+                    aspose_slide = aspose_prs.slides[i]
 
-                    # Pic shapes
+                    # Picture shapes
                     pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
 
                     if pic_shapes:
@@ -149,14 +186,17 @@ if uploaded_file is not None:
                             base_filename = "_".join(components) + suffix
                             final_name = f"{base_filename}.jpg"
 
-                            # Image extraction logic
-                            zip_file.writestr(final_name, pic.image.blob)
+                            # Render full slide & crop red marked image
+                            cropped_data = render_and_crop(
+                                aspose_slide, pic, slide_width_emu, slide_height_emu
+                            )
+                            zip_file.writestr(final_name, cropped_data)
                             processed_count += 1
 
-        st.success(f"🎉 Success! Extracted {processed_count} images.")
+        st.success(f"🎉 Success! Extracted {processed_count} images with exact markings.")
         st.download_button(
-            label="📥 Download Renamed Images (ZIP)",
+            label="📥 Download Cropped Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Renamed_Images.zip",
+            file_name="Renamed_Images_With_Red_Marking.zip",
             mime="application/zip",
         )
