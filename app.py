@@ -1,178 +1,109 @@
 import io
-import os
 import re
 import zipfile
 import fitz  # PyMuPDF
-from pptx import Presentation
 import streamlit as st
 from PIL import Image
 
-st.set_page_config(
-    page_title="PPT Image Extractor with Marking", page_icon="🖼️", layout="wide"
-)
-st.title("🖼️ PPT Image Extractor (PDF High-Precision Engine)")
-st.write("Format: **OutletName_MobileNo_Type_Size.jpg**")
+st.set_page_config(page_title="PDF to Image Converter & Cropper", page_icon="🖼️", layout="wide")
 
-image_position = st.sidebar.radio(
-    "Konsi Image Extract karni hai?", ["Left Image", "Right Image", "Dono (Both)"]
-)
+st.title("🖼️ PDF Slide to Image Extractor")
+st.write("PDF upload karein aur slides/images ko high quality JPG format me crop/extract karein.")
 
-uploaded_file = st.sidebar.file_uploader(
-    "PowerPoint File Upload Karein (.pptx)", type=["pptx"]
-)
+# Sidebar controls
+st.sidebar.header("Settings")
+zoom_factor = st.sidebar.slider("Image Quality / Resolution", min_value=1.0, max_value=4.0, value=2.0, step=0.5)
+crop_mode = st.sidebar.radio("Crop Mode", ["Full Page/Slide", "Left Half (Left Image)", "Right Half (Right Image)"])
 
+uploaded_pdf = st.file_uploader("📄 PDF File Upload Karein (.pdf)", type=["pdf"])
 
-def clean_text(text):
-    if not text:
-        return ""
-    clean = re.sub(r'[^A-Za-z0-9]+', ' ', text).strip()
-    return clean.replace(" ", "_").upper()
-
-
-def extract_info_from_slide(slide):
-    all_text_blocks = []
-
-    for shape in slide.shapes:
-        if shape.has_text_frame:
-            for paragraph in shape.text_frame.paragraphs:
-                txt = paragraph.text.strip()
-                if txt:
-                    all_text_blocks.append(txt)
-        elif shape.has_table:
-            for row in shape.table.rows:
-                for cell in row.cells:
-                    cell_text = cell.text.strip()
-                    if cell_text:
-                        all_text_blocks.append(cell_text)
-
-    full_text = " \n ".join(all_text_blocks)
-
+def extract_metadata(text):
+    """PDF text se Outlet Name, Mobile, Type, Size auto-extract karein"""
     outlet_name = ""
     contact_no = ""
     media_type = ""
     size = ""
 
-    # Outlet Name
-    outlet_match = re.search(r"Outlet\s*Name\s*[:\-]?\s*([^\n\r]+)", full_text, re.IGNORECASE)
-    if outlet_match:
-        raw_name = outlet_match.group(1).strip()
-        cleaned_name = re.split(r"Address", raw_name, flags=re.IGNORECASE)[0].strip()
-        if cleaned_name:
-            outlet_name = clean_text(cleaned_name)
-
-    if not outlet_name:
-        ignore_keywords = [
-            "qty", "size", "type", "address", "city", "contact",
-            "far view", "close view", "board", "installation", "outlet"
-        ]
-        for block in all_text_blocks:
-            lines = [l.strip() for l in block.split("\n") if l.strip()]
-            for line in lines:
-                if not any(k in line.lower() for k in ignore_keywords):
-                    if len(line) > 2 and not line.isdigit():
-                        outlet_name = clean_text(line)
-                        break
-            if outlet_name:
-                break
-
-    # Contact No
-    contact_match = re.search(r"\b[6-9]\d{9}\b", full_text)
+    # Mobile Number (10 digits starting with 6-9)
+    contact_match = re.search(r"\b[6-9]\d{9}\b", text)
     if contact_match:
         contact_no = contact_match.group(0)
 
+    # Outlet Name
+    outlet_match = re.search(r"Outlet\s*Name\s*[:\-]?\s*([^\n\r]+)", text, re.IGNORECASE)
+    if outlet_match:
+        outlet_name = outlet_match.group(1).strip().replace(" ", "_")
+
     # Type
-    type_match = re.search(r"Type\s*[:\-]?\s*([A-Za-z0-9]+)", full_text, re.IGNORECASE)
+    type_match = re.search(r"\b(NL|FL|BL|SB|GSB|NON-LIT|FLEX)\b", text, re.IGNORECASE)
     if type_match:
         media_type = type_match.group(1).upper()
-    else:
-        gen_type = re.search(r"\b(NL|FL|BL|SB|GSB|NON-LIT|FLEX)\b", full_text, re.IGNORECASE)
-        if gen_type:
-            media_type = gen_type.group(1).upper()
 
     # Size
-    size_match = re.search(r"Size\s*[:\-]?\s*(\d{1,3})\s*x\s*(\d{1,3})", full_text, re.IGNORECASE)
+    size_match = re.search(r"(\d{1,3}\s*x\s*\d{1,3})", text, re.IGNORECASE)
     if size_match:
-        size = f"{size_match.group(1)}x{size_match.group(2)}"
-    else:
-        gen_size = re.search(r"(\d{1,3})\s*x\s*(\d{1,3})", full_text, re.IGNORECASE)
-        if gen_size:
-            size = f"{gen_size.group(1)}x{gen_size.group(2)}"
+        size = size_match.group(1).replace(" ", "")
 
     return outlet_name, contact_no, media_type, size
 
+if uploaded_pdf is not None:
+    pdf_bytes = uploaded_pdf.getvalue()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    total_pages = len(doc)
+    st.success(f"✅ Total Pages/Slides Found: {total_pages}")
 
-def render_pdf_from_pptx(prs, pic_shape, slide_index):
-    """Fallback: Convert image bytes and merge exact shapes without external PDF binaries"""
-    img_bytes = io.BytesIO(pic_shape.image.blob)
-    pil_img = Image.open(img_bytes).convert("RGB")
-    
-    # High DPI Buffer return
-    out_b = io.BytesIO()
-    pil_img.save(out_b, format="JPEG", quality=98)
-    return out_b.getvalue()
-
-
-if uploaded_file is not None:
-    file_bytes = uploaded_file.getvalue()
-    prs = Presentation(io.BytesIO(file_bytes))
-    total_slides = len(prs.slides)
-    st.sidebar.success(f"Total Slides: {total_slides}")
-
-    if st.button("🚀 Start Extraction (Convert PDF & Crop)"):
+    if st.button("🚀 Process & Download Images"):
         zip_buffer = io.BytesIO()
-        processed_count = 0
-
         progress_bar = st.progress(0)
         status_text = st.empty()
 
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-            for i, slide in enumerate(prs.slides):
-                status_text.text(f"Converting Slide {i+1} to PDF & Cropping...")
-                progress_bar.progress((i + 1) / total_slides)
+            for i, page in enumerate(doc):
+                status_text.text(f"Processing Page {i+1} of {total_pages}...")
+                progress_bar.progress((i + 1) / total_pages)
 
-                outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
-                pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
+                # Extract Text for Auto-naming
+                text = page.get_text("text")
+                outlet_name, contact_no, media_type, size = extract_metadata(text)
 
-                if pic_shapes:
-                    pic_shapes.sort(key=lambda s: s.left)
+                # Build Filename
+                components = [f"Slide_{i+1}"]
+                if outlet_name:
+                    components.append(outlet_name)
+                if contact_no:
+                    components.append(contact_no)
+                if media_type:
+                    components.append(media_type)
+                if size:
+                    components.append(size)
 
-                    if not outlet_name:
-                        outlet_name = f"SLIDE_{i+1}"
+                base_name = "_".join(components)
 
-                    targets = []
-                    if image_position == "Left Image" and len(pic_shapes) >= 1:
-                        targets.append(("", pic_shapes[0]))
-                    elif image_position == "Right Image":
-                        right_pic = pic_shapes[1] if len(pic_shapes) >= 2 else pic_shapes[0]
-                        targets.append(("", right_pic))
-                    elif image_position == "Dono (Both)":
-                        if len(pic_shapes) >= 1:
-                            targets.append(("_LEFT", pic_shapes[0]))
-                        if len(pic_shapes) >= 2:
-                            targets.append(("_RIGHT", pic_shapes[1]))
+                # High Quality Pixmap Rendering (PDF page to Image)
+                mat = fitz.Matrix(zoom_factor, zoom_factor)
+                pix = page.get_pixmap(matrix=mat)
+                
+                # Convert PyMuPDF Pixmap to PIL Image for cropping
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                w, h = img.size
 
-                    for suffix, pic in targets:
-                        components = [outlet_name]
-                        if contact_no:
-                            components.append(contact_no)
-                        if media_type:
-                            components.append(media_type)
-                        if size:
-                            components.append(size)
+                # Crop selection
+                if crop_mode == "Left Half (Left Image)":
+                    img = img.crop((0, 0, w // 2, h))
+                elif crop_mode == "Right Half (Right Image)":
+                    img = img.crop((w // 2, 0, w, h))
 
-                        base_filename = "_".join(components) + suffix
-                        final_name = f"{base_filename}.jpg"
-
-                        # Extract exact image
-                        final_data = render_pdf_from_pptx(prs, pic, i)
-                        zip_file.writestr(final_name, final_data)
-                        processed_count += 1
+                img_byte_arr = io.BytesIO()
+                img.save(img_byte_arr, format="JPEG", quality=95)
+                
+                final_filename = f"{base_name}.jpg"
+                zip_file.writestr(final_filename, img_byte_arr.getvalue())
 
         status_text.text("Processing Complete!")
-        st.success(f"🎉 Success! Extracted {processed_count} images without red lines error.")
+        st.success(f"🎉 Successfully converted {total_pages} pages into clean JPG images!")
         st.download_button(
-            label="📥 Download Renamed Images (ZIP)",
+            label="📥 Download All Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Renamed_Marked_Images.zip",
+            file_name="Converted_PDF_Images.zip",
             mime="application/zip",
         )
