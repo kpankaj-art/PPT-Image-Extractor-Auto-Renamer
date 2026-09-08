@@ -1,16 +1,15 @@
 import io
 import re
 import zipfile
-import aspose.slides.cpp as slides
 from pptx import Presentation
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageDraw
 
 st.set_page_config(
     page_title="PPT Image Extractor with Marking", page_icon="🖼️", layout="wide"
 )
-st.title("🖼️ PPT Image Extractor (Exact Red Marking Cropper)")
-st.write("Format: **OutletName_MobileNo_Type_Size.jpg** (With Exact Red Markings)")
+st.title("🖼️ PPT Image Extractor (Auto Red Box Merging)")
+st.write("Format: **OutletName_MobileNo_Type_Size.jpg** (With Red Box Overlay)")
 
 st.sidebar.header("⚙️ Settings")
 image_position = st.sidebar.radio(
@@ -52,7 +51,7 @@ def extract_info_from_slide(slide):
     media_type = ""
     size = ""
 
-    # 1. OUTLET NAME
+    # Outlet Name
     outlet_match = re.search(r"Outlet\s*Name\s*[:\-]?\s*([^\n\r]+)", full_text, re.IGNORECASE)
     if outlet_match:
         raw_name = outlet_match.group(1).strip()
@@ -75,12 +74,12 @@ def extract_info_from_slide(slide):
             if outlet_name:
                 break
 
-    # 2. CONTACT NO
+    # Contact No
     contact_match = re.search(r"\b[6-9]\d{9}\b", full_text)
     if contact_match:
         contact_no = contact_match.group(0)
 
-    # 3. TYPE
+    # Type
     type_match = re.search(r"Type\s*[:\-]?\s*([A-Za-z0-9]+)", full_text, re.IGNORECASE)
     if type_match:
         media_type = type_match.group(1).upper()
@@ -89,7 +88,7 @@ def extract_info_from_slide(slide):
         if gen_type:
             media_type = gen_type.group(1).upper()
 
-    # 4. SIZE
+    # Size
     size_match = re.search(r"Size\s*[:\-]?\s*(\d{1,3})\s*x\s*(\d{1,3})", full_text, re.IGNORECASE)
     if size_match:
         size = f"{size_match.group(1)}x{size_match.group(2)}"
@@ -101,50 +100,58 @@ def extract_info_from_slide(slide):
     return outlet_name, contact_no, media_type, size
 
 
-def render_and_crop(aspose_slide, pic_shape, slide_width_emu, slide_height_emu):
-    bmp = aspose_slide.get_image(2.0, 2.0)
-    img_bytes = io.BytesIO()
-    bmp.save(img_bytes, slides.image_format.JPEG)
-    img_bytes.seek(0)
+def draw_red_markings(pic_shape, slide):
+    """Detects shape overlays over the image and draws red rectangles on original picture"""
+    image_bytes = io.BytesIO(pic_shape.image.blob)
+    pil_img = Image.open(image_bytes).convert("RGB")
+    draw = ImageDraw.Draw(pil_img)
 
-    pil_slide = Image.open(img_bytes)
-    slide_pixel_w, slide_pixel_h = pil_slide.size
+    pic_left = pic_shape.left
+    pic_top = pic_shape.top
+    pic_width = pic_shape.width
+    pic_height = pic_shape.height
 
-    scale_x = slide_pixel_w / slide_width_emu
-    scale_y = slide_pixel_h / slide_height_emu
+    img_w, img_h = pil_img.size
 
-    left = int(pic_shape.left * scale_x)
-    top = int(pic_shape.top * scale_y)
-    right = int((pic_shape.left + pic_shape.width) * scale_x)
-    bottom = int((pic_shape.top + pic_shape.height) * scale_y)
+    for shape in slide.shapes:
+        if shape != pic_shape and shape.shape_type != 13:
+            if (
+                shape.left >= pic_left - 10000
+                and (shape.left + shape.width) <= (pic_left + pic_width + 10000)
+                and shape.top >= pic_top - 10000
+                and (shape.top + shape.height) <= (pic_top + pic_height + 10000)
+            ):
+                rel_x1 = max(0, int(((shape.left - pic_left) / pic_width) * img_w))
+                rel_y1 = max(0, int(((shape.top - pic_top) / pic_height) * img_h))
+                rel_x2 = min(img_w, int(((shape.left + shape.width - pic_left) / pic_width) * img_w))
+                rel_y2 = min(img_h, int(((shape.top + shape.height - pic_top) / pic_height) * img_h))
 
-    cropped_img = pil_slide.crop((left, top, right, bottom))
+                if rel_x2 > rel_x1 and rel_y2 > rel_y1:
+                    line_thickness = max(5, int(img_w / 120))
+                    draw.rectangle(
+                        [rel_x1, rel_y1, rel_x2, rel_y2],
+                        outline="red",
+                        width=line_thickness,
+                    )
 
     out_bytes = io.BytesIO()
-    cropped_img.save(out_bytes, format="JPEG", quality=95)
+    pil_img.save(out_bytes, format="JPEG", quality=95)
     return out_bytes.getvalue()
 
 
 if uploaded_file is not None:
-    file_bytes = uploaded_file.read()
-    prs = Presentation(io.BytesIO(file_bytes))
+    prs = Presentation(uploaded_file)
     total_slides = len(prs.slides)
     st.sidebar.success(f"Total Slides: {total_slides}")
 
-    aspose_prs = slides.Presentation(io.BytesIO(file_bytes))
-
-    slide_width_emu = prs.slide_width
-    slide_height_emu = prs.slide_height
-
-    if st.button("🚀 Start Crop Extraction (With Red Box)"):
+    if st.button("🚀 Start Extraction & Rename"):
         zip_buffer = io.BytesIO()
         processed_count = 0
 
-        with st.spinner("Rendering slides and cropping marked images..."):
+        with st.spinner("Overlaying Red Box and renaming images..."):
             with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
-                    aspose_slide = aspose_prs.slides[i]
 
                     pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
 
@@ -178,16 +185,14 @@ if uploaded_file is not None:
                             base_filename = "_".join(components) + suffix
                             final_name = f"{base_filename}.jpg"
 
-                            cropped_data = render_and_crop(
-                                aspose_slide, pic, slide_width_emu, slide_height_emu
-                            )
-                            zip_file.writestr(final_name, cropped_data)
+                            final_image_data = draw_red_markings(pic, slide)
+                            zip_file.writestr(final_name, final_image_data)
                             processed_count += 1
 
-        st.success(f"🎉 Success! Extracted {processed_count} images with exact markings.")
+        st.success(f"🎉 Success! Extracted {processed_count} images with Red Marking.")
         st.download_button(
-            label="📥 Download Cropped Images (ZIP)",
+            label="📥 Download Renamed Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Renamed_Images_With_Red_Marking.zip",
+            file_name="Renamed_Images_With_Marking.zip",
             mime="application/zip",
         )
