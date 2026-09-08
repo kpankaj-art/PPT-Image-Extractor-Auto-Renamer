@@ -26,7 +26,6 @@ def clean_text(text):
     """Clean string to keep only alphanumeric and standard characters"""
     if not text:
         return ""
-    # Strip spaces and special characters
     clean = re.sub(r'[^A-Za-z0-9]+', ' ', text).strip()
     return clean.replace(" ", "_").upper()
 
@@ -63,7 +62,6 @@ def extract_info_from_slide(slide):
     )
     if outlet_match:
         raw_name = outlet_match.group(1).strip()
-        # Cut off string if Address attached
         cleaned_name = re.split(
             r"Address", raw_name, flags=re.IGNORECASE
         )[0].strip()
@@ -98,19 +96,17 @@ def extract_info_from_slide(slide):
     if type_match:
         media_type = type_match.group(1).upper()
     else:
-        # Generic Type Keyword Search
         gen_type = re.search(r"\b(NL|FL|BL|SB|GSB|NON-LIT|FLEX)\b", full_text, re.IGNORECASE)
         if gen_type:
             media_type = gen_type.group(1).upper()
 
-    # --- 4. SIZE EXTRACTION (Fixes spaces like 96 x 18 -> 96x18) ---
+    # --- 4. SIZE EXTRACTION ---
     size_match = re.search(
         r"Size\s*[:\-]?\s*(\d{1,3})\s*x\s*(\d{1,3})", full_text, re.IGNORECASE
     )
     if size_match:
         size = f"{size_match.group(1)}x{size_match.group(2)}"
     else:
-        # Fallback Size pattern match
         gen_size = re.search(r"(\d{1,3})\s*x\s*(\d{1,3})", full_text, re.IGNORECASE)
         if gen_size:
             size = f"{gen_size.group(1)}x{gen_size.group(2)}"
@@ -133,29 +129,35 @@ if uploaded_file is not None:
                 for i, slide in enumerate(prs.slides):
                     outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
 
-                    # Pic shapes
+                    # Pic shapes find karein
                     pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
 
                     if pic_shapes:
-                        # Sort left to right
+                        # Left-to-Right Position basis par sort karein
                         pic_shapes.sort(key=lambda s: s.left)
 
                         if not outlet_name:
                             outlet_name = f"SLIDE_{i+1}"
 
                         targets = []
+                        # Left Image Target
                         if image_position == "Left Image" and len(pic_shapes) >= 1:
                             targets.append(("", pic_shapes[0]))
-                        elif image_position == "Right Image" and len(pic_shapes) >= 2:
-                            targets.append(("", pic_shapes[1]))
-                        elif image_position == "Right Image" and len(pic_shapes) == 1:
-                            targets.append(("", pic_shapes[0]))
+                        
+                        # Right Image Target (Same Naming Rule apply hoga)
+                        elif image_position == "Right Image":
+                            # Slide par agar 2 images ho toh right vali (index 1), varna index 0
+                            right_pic = pic_shapes[1] if len(pic_shapes) >= 2 else pic_shapes[0]
+                            targets.append(("", right_pic))
+                        
+                        # Dono (Both) Images
                         elif image_position == "Dono (Both)":
                             if len(pic_shapes) >= 1:
                                 targets.append(("_LEFT", pic_shapes[0]))
                             if len(pic_shapes) >= 2:
                                 targets.append(("_RIGHT", pic_shapes[1]))
 
+                        # Rename and write to ZIP
                         for suffix, pic in targets:
                             components = [outlet_name]
                             if contact_no:
