@@ -1,135 +1,160 @@
-import streamlit as st
+import io
 import os
 import re
 import zipfile
-import io
 from pptx import Presentation
+import streamlit as st
 
-st.set_page_config(page_title="PPT Image Extractor", layout="wide")
-st.title("📸 PPT Image Extractor & Renamer (Fixed)")
+st.set_page_config(
+    page_title="PPT Left Image Extractor", page_icon="🖼️", layout="centered"
+)
+st.title("🖼️ PPT Image Extractor & Auto-Renamer")
+st.write(
+    "Format: **OutletName_MobileNo_Type_Size.jpg** (Only Left Image Extracted)"
+)
 
-# Sidebar Controls
-st.sidebar.header("⚙️ Selection")
-image_position = st.sidebar.radio("Konsi Image Extraction chahiye?", ["Left Image", "Right Image", "Dono (Both)"])
 
-uploaded_file = st.sidebar.file_uploader("PPTX File Upload Karein", type=["pptx"])
+def clean_text(text):
+    """File name safe characters remove/cleaner"""
+    if not text:
+        return ""
+    # Space and special characters to underscore
+    clean = re.sub(r'[\\/*?:"<>|\n\r\t]', " ", text)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean.replace(" ", "_")
 
-# Sub-function to extract text even from grouped shapes & tables
-def get_shape_text(shape):
-    texts = []
-    if shape.has_text_frame:
-        for paragraph in shape.text_frame.paragraphs:
-            if paragraph.text.strip():
-                texts.append(paragraph.text.strip())
-    elif shape.has_table:
-        for row in shape.table.rows:
-            for cell in row.cells:
-                if cell.text.strip():
-                    texts.append(cell.text.strip())
-    elif shape.shape_type == 6:  # Group Shape
-        for sub_shape in shape.shapes:
-            texts.extend(get_shape_text(sub_shape))
-    return texts
 
-def parse_slide_metadata(slide):
-    all_texts = []
+def extract_info_from_slide(slide):
+    all_text_blocks = []
+
+    # 1. Shapes and Text Frames se Text Extract karein
     for shape in slide.shapes:
-        all_texts.extend(get_shape_text(shape))
-    
-    full_str = " \n ".join(all_texts)
+        if shape.has_text_frame:
+            txt = shape.text_frame.text.strip()
+            if txt:
+                all_text_blocks.append(txt)
 
-    # Defaults
-    name = "OUTLET"
-    phone = "0000000000"
-    media_type = "NL"
-    size = "0x0"
+        # 2. Table Shapes ke andar se Text Extract karein (Ye aapki PPT ke liye zaroori hai)
+        if shape.has_table:
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    cell_text = cell.text.strip()
+                    if cell_text:
+                        all_text_blocks.append(cell_text)
 
-    # 1. Extract Outlet Name (Looks for "Outlet Name:" or anything before "Address:" or line break)
-    name_match = re.search(r"Outlet\s*Name\s*:?\s*([^\n\r]+)", full_str, re.IGNORECASE)
-    if name_match:
-        raw_name = name_match.group(1)
-        raw_name = re.split(r"Address\s*:", raw_name, flags=re.IGNORECASE)[0]
-        name = re.sub(r'[^A-Za-z0-9]+', '_', raw_name).strip('_').upper()
+    full_text = "\n".join(all_text_blocks)
 
-    # 2. Extract Phone Number (Looks for "Contact" label OR any 10-digit number)
-    phone_match = re.search(r"(?:Contact|Mob|Mobile|Phone)?\s*(?:No|Num|Number)?\s*:?\s*(\d{10})", full_str, re.IGNORECASE)
-    if phone_match:
-        phone = phone_match.group(1)
-    else:
-        all_10_digits = re.findall(r'\b\d{10}\b', full_str)
-        if all_10_digits:
-            phone = all_10_digits[0]
+    outlet_name = ""
+    contact_no = ""
+    media_type = ""
+    size = ""
 
-    # 3. Extract Type (Looks for "Type:" or standalone keywords like NL, BL, GSB)
-    type_match = re.search(r"Type\s*:?\s*([A-Za-z0-9_-]+)", full_str, re.IGNORECASE)
+    # --- OUTLET NAME EXTRACTION ---
+    # Pattern 1: Outlet Name: XYZ
+    outlet_match = re.search(
+        r"Outlet\s*Name\s*[:\-]?\s*([^\n\r]+)", full_text, re.IGNORECASE
+    )
+    if outlet_match:
+        raw_name = outlet_match.group(1).strip()
+        cleaned_name = re.split(
+            r"Address|City|Contact|Installation|Type|Size|Qty",
+            raw_name,
+            flags=re.IGNORECASE,
+        )[0].strip()
+        if cleaned_name:
+            outlet_name = cleaned_name
+
+    # Pattern 2: Agar label bina direct text block me Outlet Name likha ho
+    if not outlet_name:
+        ignore_keywords = [
+            "qty",
+            "size",
+            "type",
+            "address",
+            "city",
+            "contact",
+            "far view",
+            "close view",
+            "board",
+            "installation",
+            "dealer_code",
+            "outlet",
+        ]
+        for block in all_text_blocks:
+            lines = [l.strip() for l in block.split("\n") if l.strip()]
+            for line in lines:
+                if not any(k in line.lower() for k in ignore_keywords):
+                    if len(line) > 2 and not line.isdigit():
+                        outlet_name = line
+                        break
+            if outlet_name:
+                break
+
+    # --- CONTACT NUMBER EXTRACTION ---
+    contact_match = re.search(r"\b[6-9]\d{9}\b", full_text)
+    if contact_match:
+        contact_no = contact_match.group(0)
+
+    # --- TYPE EXTRACTION (NL, FL, BL, SB, etc.) ---
+    type_match = re.search(
+        r"\b(NL|FL|BL|SB|GSB|Non-Lit|Flex)\b", full_text, re.IGNORECASE
+    )
     if type_match:
-        media_type = type_match.group(1).strip().upper()
+        media_type = type_match.group(1).upper()
 
-    # 4. Extract Size (e.g., 96 x 18 or 96x18)
-    size_match = re.search(r"Size\s*:?\s*(\d+)\s*x\s*(\d+)", full_str, re.IGNORECASE)
+    # --- SIZE EXTRACTION (e.g. 10x4, 8x3, 24x84) ---
+    size_match = re.search(
+        r"(\d{1,3}\s*x\s*\d{1,3})", full_text, re.IGNORECASE
+    )
     if size_match:
-        size = f"{size_match.group(1)}x{size_match.group(2)}"
-    else:
-        # Generic pattern like 8x4 or 96x18 anywhere in text
-        generic_size = re.search(r'\b(\d{1,3})\s*x\s*(\d{1,3})\b', full_str, re.IGNORECASE)
-        if generic_size:
-            size = f"{generic_size.group(1)}x{generic_size.group(2)}"
+        size = size_match.group(1).replace(" ", "").lower()
 
-    return name, phone, media_type, size
+    return outlet_name, contact_no, media_type, size
 
+
+uploaded_file = st.file_uploader("PowerPoint File Upload Karein (.pptx)", type=["pptx"])
 
 if uploaded_file is not None:
     prs = Presentation(uploaded_file)
-    st.info(f"Total Slides: {len(prs.slides)}")
+    zip_buffer = io.BytesIO()
 
-    if st.button("🚀 Start Extraction & Rename"):
-        zip_buffer = io.BytesIO()
-        processed_count = 0
-
+    with st.spinner("Processing slides..."):
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-            progress_bar = st.progress(0)
-
             for i, slide in enumerate(prs.slides):
-                # Extract details
-                name, phone, media_type, size = parse_slide_metadata(slide)
+                outlet_name, contact_no, media_type, size = (
+                    extract_info_from_slide(slide)
+                )
 
-                # Fetch all picture objects
-                pictures = []
-                for shape in slide.shapes:
-                    if shape.shape_type == 13:  # Picture shape
-                        pictures.append((shape.left, shape.image))
+                # Slide ki sirf images (Picture shapes) find karein
+                pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
 
-                # Sort pictures from left to right
-                pictures.sort(key=lambda x: x[0])
+                if pic_shapes:
+                    # Strictly left side image extraction
+                    leftmost_pic = min(pic_shapes, key=lambda s: s.left)
 
-                targets = []
-                if image_position == "Left Image" and len(pictures) >= 1:
-                    targets.append(("", pictures[0][1]))
-                elif image_position == "Right Image" and len(pictures) >= 2:
-                    targets.append(("", pictures[1][1]))
-                elif image_position == "Right Image" and len(pictures) == 1:
-                    targets.append(("", pictures[0][1]))
-                elif image_position == "Dono (Both)":
-                    if len(pictures) >= 1:
-                        targets.append(("_LEFT", pictures[0][1]))
-                    if len(pictures) >= 2:
-                        targets.append(("_RIGHT", pictures[1][1]))
+                    # Agar name abhi bhi nahi mil pata tabhi simple Fallback name lagega
+                    if not outlet_name:
+                        outlet_name = f"Slide_{i+1}"
 
-                for suffix, img_obj in targets:
-                    # Duplicate files prevent karne ke liye slide index append
-                    file_name = f"{name}_{phone}_{media_type}_{size}{suffix}.jpg"
-                    
-                    # Store image in ZIP
-                    zip_file.writestr(file_name, img_obj.blob)
-                    processed_count += 1
+                    # Filename structure formation
+                    components = [clean_text(outlet_name)]
+                    if contact_no:
+                        components.append(clean_text(contact_no))
+                    if media_type:
+                        components.append(clean_text(media_type))
+                    if size:
+                        components.append(clean_text(size))
 
-                progress_bar.progress((i + 1) / len(prs.slides))
+                    base_filename = "_".join(components)
+                    ext = leftmost_pic.image.ext
+                    final_name = f"{base_filename}.{ext}"
 
-        st.success(f"Success! {processed_count} Images extracted and renamed.")
+                    zip_file.writestr(final_name, leftmost_pic.image.blob)
 
-        st.download_button(
-            label="📦 Download Fixed ZIP",
-            data=zip_buffer.getvalue(),
-            file_name="Extracted_Images.zip",
-            mime="application/zip"
-        )
+    st.success("🎉 Process Complete!")
+    st.download_button(
+        label="📥 Download Renamed Images (ZIP)",
+        data=zip_buffer.getvalue(),
+        file_name="Renamed_Images.zip",
+        mime="application/zip",
+    )
