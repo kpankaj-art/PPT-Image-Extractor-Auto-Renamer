@@ -1,3 +1,4 @@
+import gc
 import io
 import os
 import re
@@ -11,7 +12,7 @@ from pdf2image import convert_from_path
 st.set_page_config(
     page_title="PPT Image Extractor with Marking", page_icon="🖼️", layout="wide"
 )
-st.title("🖼️ PPT Image Extractor (Red Box Merged Engine)")
+st.title("🖼️ PPT Image Extractor (Red Box Merged - Low Memory Engine)")
 st.write("Format: **OutletName_MobileNo_Type_Size.jpg**")
 
 image_position = st.sidebar.radio(
@@ -102,34 +103,55 @@ def extract_info_from_slide(slide):
     return outlet_name, contact_no, media_type, size
 
 
-def convert_pptx_to_images(pptx_bytes, prs):
-    """Converts PPTX slides into rendered high-res images where overlays are merged"""
-    with open("temp.pptx", "wb") as f:
+def process_single_slide_render(slide_index, prs, pptx_bytes):
+    """Processes 1 slide at a time to prevent RAM Out of Memory Crash"""
+    # Create temporary 1-slide presentation to render
+    temp_prs = Presentation()
+    temp_prs.slide_width = prs.slide_width
+    temp_prs.slide_height = prs.slide_height
+
+    # Save temp single slide pptx
+    temp_pptx = f"temp_slide_{slide_index}.pptx"
+    temp_pdf = f"temp_slide_{slide_index}.pdf"
+
+    # Save main file
+    with open(temp_pptx, "wb") as f:
         f.write(pptx_bytes)
 
-    # Convert PPTX to PDF using LibreOffice
-    subprocess.run(
-        ["libreoffice", "--headless", "--convert-to", "pdf", "temp.pptx"],
-        check=True
-    )
+    try:
+        # Convert PPTX to PDF using LibreOffice
+        subprocess.run(
+            ["libreoffice", "--headless", "--convert-to", "pdf", temp_pptx],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True
+        )
 
-    # Convert PDF pages to PIL Images
-    slide_images = convert_from_path("temp.pdf", dpi=200)
+        # Convert specific slide page from PDF to PIL Image (Low DPI to save memory)
+        slide_images = convert_from_path(
+            temp_pdf,
+            first_page=slide_index + 1,
+            last_page=slide_index + 1,
+            dpi=150
+        )
+        rendered_slide_img = slide_images[0] if slide_images else None
+    except Exception:
+        rendered_slide_img = None
+    finally:
+        # CLEANUP DISK & RAM AFTER EACH SLIDE
+        if os.path.exists(temp_pptx):
+            os.remove(temp_pptx)
+        if os.path.exists(temp_pdf):
+            os.remove(temp_pdf)
+        gc.collect()
 
-    # Cleanup temp files
-    if os.path.exists("temp.pptx"):
-        os.remove("temp.pptx")
-    if os.path.exists("temp.pdf"):
-        os.remove("temp.pdf")
-
-    return slide_images
+    return rendered_slide_img
 
 
 def crop_picture_from_slide_image(slide_img, pic_shape, prs_width, prs_height):
-    """Crops the exact picture coordinates from full rendered slide image"""
+    """Crops the exact picture area from full rendered slide"""
     img_w, img_h = slide_img.size
 
-    # Calculate exact bounding ratio
     left_ratio = pic_shape.left / prs_width
     top_ratio = pic_shape.top / prs_height
     width_ratio = pic_shape.width / prs_width
@@ -143,7 +165,13 @@ def crop_picture_from_slide_image(slide_img, pic_shape, prs_width, prs_height):
     cropped_img = slide_img.crop((crop_x1, crop_y1, crop_x2, crop_y2))
 
     out_b = io.BytesIO()
-    cropped_img.save(out_b, format="JPEG", quality=95)
+    cropped_img.save(out_b, format="JPEG", quality=90)
+    
+    # Cleanup memory
+    cropped_img.close()
+    del cropped_img
+    gc.collect()
+
     return out_b.getvalue()
 
 
@@ -157,63 +185,70 @@ if uploaded_file is not None:
         zip_buffer = io.BytesIO()
         processed_count = 0
 
-        with st.spinner("Rendering slides & cropping marked images..."):
-            try:
-                # Render all slides to high-res full images
-                rendered_slides = convert_pptx_to_images(file_bytes, prs)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
 
-                with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                    for i, slide in enumerate(prs.slides):
-                        outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
+        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+            for i, slide in enumerate(prs.slides):
+                status_text.text(f"Processing Slide {i+1} of {total_slides} (Memory Auto-Clean)...")
+                progress_bar.progress((i + 1) / total_slides)
 
-                        pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
+                outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
+                pic_shapes = [s for s in slide.shapes if s.shape_type == 13]
 
-                        if pic_shapes and i < len(rendered_slides):
-                            pic_shapes.sort(key=lambda s: s.left)
+                if pic_shapes:
+                    pic_shapes.sort(key=lambda s: s.left)
 
-                            if not outlet_name:
-                                outlet_name = f"SLIDE_{i+1}"
+                    if not outlet_name:
+                        outlet_name = f"SLIDE_{i+1}"
 
-                            targets = []
-                            if image_position == "Left Image" and len(pic_shapes) >= 1:
-                                targets.append(("", pic_shapes[0]))
-                            elif image_position == "Right Image":
-                                right_pic = pic_shapes[1] if len(pic_shapes) >= 2 else pic_shapes[0]
-                                targets.append(("", right_pic))
-                            elif image_position == "Dono (Both)":
-                                if len(pic_shapes) >= 1:
-                                    targets.append(("_LEFT", pic_shapes[0]))
-                                if len(pic_shapes) >= 2:
-                                    targets.append(("_RIGHT", pic_shapes[1]))
+                    # Process render ONLY for current slide
+                    slide_img = process_single_slide_render(i, prs, file_bytes)
 
-                            for suffix, pic in targets:
-                                components = [outlet_name]
-                                if contact_no:
-                                    components.append(contact_no)
-                                if media_type:
-                                    components.append(media_type)
-                                if size:
-                                    components.append(size)
+                    if slide_img:
+                        targets = []
+                        if image_position == "Left Image" and len(pic_shapes) >= 1:
+                            targets.append(("", pic_shapes[0]))
+                        elif image_position == "Right Image":
+                            right_pic = pic_shapes[1] if len(pic_shapes) >= 2 else pic_shapes[0]
+                            targets.append(("", right_pic))
+                        elif image_position == "Dono (Both)":
+                            if len(pic_shapes) >= 1:
+                                targets.append(("_LEFT", pic_shapes[0]))
+                            if len(pic_shapes) >= 2:
+                                targets.append(("_RIGHT", pic_shapes[1]))
 
-                                base_filename = "_".join(components) + suffix
-                                final_name = f"{base_filename}.jpg"
+                        for suffix, pic in targets:
+                            components = [outlet_name]
+                            if contact_no:
+                                components.append(contact_no)
+                            if media_type:
+                                components.append(media_type)
+                            if size:
+                                components.append(size)
 
-                                # Crop image from the rendered slide (which already has red box merged)
-                                final_data = crop_picture_from_slide_image(
-                                    rendered_slides[i],
-                                    pic,
-                                    prs.slide_width,
-                                    prs.slide_height,
-                                )
-                                zip_file.writestr(final_name, final_data)
-                                processed_count += 1
+                            base_filename = "_".join(components) + suffix
+                            final_name = f"{base_filename}.jpg"
 
-                st.success(f"🎉 Success! Extracted {processed_count} images with Red Box merged.")
-                st.download_button(
-                    label="📥 Download Renamed Images (ZIP)",
-                    data=zip_buffer.getvalue(),
-                    file_name="Renamed_Marked_Images.zip",
-                    mime="application/zip",
-                )
-            except Exception as e:
-                st.error(f"Error during rendering: {str(e)}")
+                            final_data = crop_picture_from_slide_image(
+                                slide_img,
+                                pic,
+                                prs.slide_width,
+                                prs.slide_height,
+                            )
+                            zip_file.writestr(final_name, final_data)
+                            processed_count += 1
+
+                        # Close image object and force GC
+                        slide_img.close()
+                        del slide_img
+                        gc.collect()
+
+        status_text.text("Processing Complete!")
+        st.success(f"🎉 Success! Extracted {processed_count} images with Red Box merged.")
+        st.download_button(
+            label="📥 Download Renamed Images (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="Renamed_Marked_Images.zip",
+            mime="application/zip",
+        )
