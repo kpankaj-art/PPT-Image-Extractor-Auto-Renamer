@@ -1,16 +1,14 @@
 import io
-import os
 import re
 import zipfile
-import fitz  # PyMuPDF
-import aspose.slides as slides
 from pptx import Presentation
 import streamlit as st
+from PIL import Image, ImageDraw
 
 st.set_page_config(
     page_title="PPT Image Extractor with Marking", page_icon="🖼️", layout="wide"
 )
-st.title("🖼️ PPT Image Extractor (Accurate Red Box via PDF)")
+st.title("🖼️ PPT Image Extractor (Red Box Marking)")
 st.write("Format: **OutletName_MobileNo_Type_Size.jpg**")
 
 image_position = st.sidebar.radio(
@@ -101,37 +99,66 @@ def extract_info_from_slide(slide):
     return outlet_name, contact_no, media_type, size
 
 
-def crop_image_from_pdf_page(pdf_doc, slide_index, pic_shape, prs_width, prs_height):
-    """Crops exact image bounding box from converted PDF slide page"""
-    page = pdf_doc.load_page(slide_index)
-    rect = page.rect
-    pdf_w, pdf_h = rect.width, rect.height
+def process_image_with_strict_marking(pic_shape, slide):
+    """Strict Overlay Bounding - No Random Extra Lines"""
+    image_bytes = io.BytesIO(pic_shape.image.blob)
+    pil_img = Image.open(image_bytes).convert("RGB")
+    draw = ImageDraw.Draw(pil_img)
 
-    # Calculate exact relative crop coordinates
-    left_ratio = pic_shape.left / prs_width
-    top_ratio = pic_shape.top / prs_height
-    width_ratio = pic_shape.width / prs_width
-    height_ratio = pic_shape.height / prs_height
+    pic_left = pic_shape.left
+    pic_top = pic_shape.top
+    pic_width = pic_shape.width
+    pic_height = pic_shape.height
 
-    crop_x1 = left_ratio * pdf_w
-    crop_y1 = top_ratio * pdf_h
-    crop_x2 = (left_ratio + width_ratio) * pdf_w
-    crop_y2 = (top_ratio + height_ratio) * pdf_h
+    img_w, img_h = pil_img.size
 
-    crop_rect = fitz.Rect(crop_x1, crop_y1, crop_x2, crop_y2)
+    for shape in slide.shapes:
+        # Check if shape is an overlay rectangle/box placed specifically ON this image
+        if shape != pic_shape and shape.shape_type != 13:
+            s_left = shape.left
+            s_top = shape.top
+            s_right = shape.left + shape.width
+            s_bottom = shape.top + shape.height
 
-    # High quality render (3x zoom = ~300 DPI)
-    zoom = 3.0
-    mat = fitz.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=mat, clip=crop_rect)
+            p_right = pic_left + pic_width
+            p_bottom = pic_top + pic_height
 
-    img_data = pix.tobytes("jpeg")
-    return img_data
+            # Strict overlap filter (Ignores outside borders/lines)
+            overlap_left = max(s_left, pic_left)
+            overlap_top = max(s_top, pic_top)
+            overlap_right = min(s_right, p_right)
+            overlap_bottom = min(s_bottom, p_bottom)
+
+            # Only consider if shape covers meaningful area inside image
+            if overlap_right > overlap_left and overlap_bottom > overlap_top:
+                rel_x1 = int(((overlap_left - pic_left) / pic_width) * img_w)
+                rel_y1 = int(((overlap_top - pic_top) / pic_height) * img_h)
+                rel_x2 = int(((overlap_right - pic_left) / pic_width) * img_w)
+                rel_y2 = int(((overlap_bottom - pic_top) / pic_height) * img_h)
+
+                # Ensure dimensions are valid inside image bounds
+                if (rel_x2 - rel_x1) > 10 and (rel_y2 - rel_y1) > 10:
+                    line_thickness = max(6, int(img_w / 90))
+                    
+                    # Lock borders strictly within image dimensions
+                    rel_x1 = max(line_thickness // 2, rel_x1)
+                    rel_y1 = max(line_thickness // 2, rel_y1)
+                    rel_x2 = min(img_w - line_thickness // 2, rel_x2)
+                    rel_y2 = min(img_h - line_thickness // 2, rel_y2)
+
+                    draw.rectangle(
+                        [rel_x1, rel_y1, rel_x2, rel_y2],
+                        outline="red",
+                        width=line_thickness,
+                    )
+
+    out_bytes = io.BytesIO()
+    pil_img.save(out_bytes, format="JPEG", quality=95)
+    return out_bytes.getvalue()
 
 
 if uploaded_file is not None:
-    file_bytes = uploaded_file.getvalue()
-    prs = Presentation(io.BytesIO(file_bytes))
+    prs = Presentation(uploaded_file)
     total_slides = len(prs.slides)
     st.sidebar.success(f"Total Slides: {total_slides}")
 
@@ -139,29 +166,12 @@ if uploaded_file is not None:
         zip_buffer = io.BytesIO()
         processed_count = 0
 
-        status_text = st.empty()
-        status_text.text("Step 1/2: Converting PPT to PDF for perfect Red Box alignment...")
-
-        # Save temporary PPTX file
-        temp_pptx = "temp_input.pptx"
-        temp_pdf = "temp_output.pdf"
-        
-        with open(temp_pptx, "wb") as f:
-            f.write(file_bytes)
-
-        # Convert PPT to PDF using Aspose
-        pres = slides.Presentation(temp_pptx)
-        pres.save(temp_pdf, slides.export.SaveFormat.PDF)
-        pres.dispose()
-
-        # Load PDF using PyMuPDF
-        pdf_doc = fitz.open(temp_pdf)
-
         progress_bar = st.progress(0)
+        status_text = st.empty()
 
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             for i, slide in enumerate(prs.slides):
-                status_text.text(f"Step 2/2: Extracting Slide {i+1} of {total_slides}...")
+                status_text.text(f"Processing Slide {i+1} of {total_slides}...")
                 progress_bar.progress((i + 1) / total_slides)
 
                 outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
@@ -197,22 +207,12 @@ if uploaded_file is not None:
                         base_filename = "_".join(components) + suffix
                         final_name = f"{base_filename}.jpg"
 
-                        final_image_data = crop_image_from_pdf_page(
-                            pdf_doc, i, pic, prs.slide_width, prs.slide_height
-                        )
+                        final_image_data = process_image_with_strict_marking(pic, slide)
                         zip_file.writestr(final_name, final_image_data)
                         processed_count += 1
 
-        pdf_doc.close()
-
-        # Clean temp files
-        if os.path.exists(temp_pptx):
-            os.remove(temp_pptx)
-        if os.path.exists(temp_pdf):
-            os.remove(temp_pdf)
-
         status_text.text("Processing Complete!")
-        st.success(f"🎉 Success! Extracted {processed_count} images with 100% accurate Red Box.")
+        st.success(f"🎉 Success! Extracted {processed_count} images.")
         st.download_button(
             label="📥 Download Renamed Images (ZIP)",
             data=zip_buffer.getvalue(),
