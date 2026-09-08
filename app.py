@@ -3,77 +3,77 @@ import os
 import re
 import zipfile
 import io
-import fitz  # PyMuPDF
 from pptx import Presentation
 from PIL import Image
 
-st.set_page_config(page_title="PPT Slide Screenshot Cropper", layout="wide")
+st.set_page_config(page_title="PPT Screenshot Cropper & Renamer", layout="wide")
 
-st.title("📸 PPT Slide Screenshot Cropper & Renamer")
-st.write("Ye app poorii slide ka screenshot render karke exact Left ya Right image box ko cropped format me extract karega (sabhi overlayed text aur geotags ke sath).")
+st.title("📸 PPT Image Cropper & Renamer")
+st.write("PPTX Upload karein, direct slide se elements extract karein aur exact Left/Right region crop karke download karein.")
 
-# 1. Sidebar Options
-st.sidebar.header("⚙️ Options")
+# Sidebar Options
+st.sidebar.header("⚙️ Selection Options")
 image_position = st.sidebar.radio("Konsi Image Crop Chahiye?", ["Left Image", "Right Image", "Dono (Both)"])
 
 uploaded_file = st.sidebar.file_uploader("PPTX File Upload Karein", type=["pptx"])
 
-# Helper function to extract metadata using Regex from Slide
-def parse_slide_metadata(slide):
-    full_text = []
+# Function to safely extract all text from slide shapes and tables
+def extract_slide_text(slide):
+    text_blocks = []
     for shape in slide.shapes:
         if shape.has_text_frame:
-            for paragraph in shape.text_frame.paragraphs:
-                full_text.append(paragraph.text.strip())
-    text_content = " ".join(full_text)
+            text_blocks.append(shape.text_frame.text)
+        elif shape.has_table:
+            for row in shape.table.rows:
+                for cell in row.cells:
+                    text_blocks.append(cell.text)
+    return "\n".join(text_blocks)
 
-    # Default values
-    name = "UNKNOWN_NAME"
-    phone = "0000000000"
-    media_type = "NL"
-    size = "0x0"
+# Improved Parser for Metadata Extraction
+def parse_slide_data(full_text):
+    # Default Fallbacks
+    outlet_name = "OUTLET"
+    contact_no = "0000000000"
+    type_val = "NL"
+    size_val = "0x0"
 
     # Extract Outlet Name
-    name_match = re.search(r"Outlet Name:\s*([^\n\r]+)", text_content, re.IGNORECASE)
+    name_match = re.search(r"Outlet Name:\s*([^\n\r]+)", full_text, re.IGNORECASE)
     if name_match:
-        name = name_match.group(1).split("Address:")[0].strip()
-        name = re.sub(r'[^A-Za-z0-9_]+', '_', name).upper()
+        raw_name = name_match.group(1).split("Address:")[0].strip()
+        outlet_name = re.sub(r'[^A-Za-z0-9]+', '_', raw_name).strip('_').upper()
 
     # Extract Contact Number
-    phone_match = re.search(r"Contact No:\s*(\d+)", text_content, re.IGNORECASE)
+    phone_match = re.search(r"Contact No:\s*(\d{10})", full_text, re.IGNORECASE)
     if phone_match:
-        phone = phone_match.group(1).strip()
+        contact_no = phone_match.group(1).strip()
+    else:
+        # Fallback phone extraction (any 10 digits)
+        digits = re.findall(r'\b\d{10}\b', full_text)
+        if digits:
+            contact_no = digits[0]
 
-    # Extract Type (e.g. Type: NL)
-    type_match = re.search(r"Type:\s*([A-Za-z0-9_]+)", text_content, re.IGNORECASE)
+    # Extract Type (e.g., Type: NL)
+    type_match = re.search(r"Type:\s*([A-Za-z0-9_]+)", full_text, re.IGNORECASE)
     if type_match:
-        media_type = type_match.group(1).strip()
+        type_val = type_match.group(1).strip().upper()
 
-    # Extract Size (e.g. Size: 96 x 18 -> 96x18)
-    size_match = re.search(r"Size:\s*(\d+)\s*x\s*(\d+)", text_content, re.IGNORECASE)
+    # Extract Size (e.g., Size: 96 x 18 -> 96x18)
+    size_match = re.search(r"Size:\s*(\d+)\s*x\s*(\d+)", full_text, re.IGNORECASE)
     if size_match:
-        size = f"{size_match.group(1)}x{size_match.group(2)}"
+        size_val = f"{size_match.group(1)}x{size_match.group(2)}"
 
-    return name, phone, media_type, size
+    return outlet_name, contact_no, type_val, size_val
 
 if uploaded_file is not None:
-    # Save uploaded file temporarily to process
-    with open("temp_presentation.pptx", "wb") as f:
-        f.write(uploaded_file.getbuffer())
-
-    prs = Presentation("temp_presentation.pptx")
+    prs = Presentation(uploaded_file)
     total_slides = len(prs.slides)
-    st.info(f"Total Slides: {total_slides}")
+    st.success(f"Total Slides Found: {total_slides}")
 
-    start_button = st.button("🚀 Start Screenshot & Crop Process")
-
-    if start_button:
+    if st.button("🚀 Start Crop & Rename Process"):
         zip_buffer = io.BytesIO()
         processed_count = 0
 
-        # Note: PPTX ko exact render karne ke liye LibreOffice/PDF conversion Python environment me required hota hai
-        # Agar PDF conversion setup na ho, toh hum PyMuPDF/PIL bounding-box rendering ka use kar rahe hain
-        
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             progress_bar = st.progress(0)
             status_text = st.empty()
@@ -81,54 +81,48 @@ if uploaded_file is not None:
             for i, slide in enumerate(prs.slides):
                 status_text.text(f"Processing Slide {i+1} of {total_slides}...")
 
-                name, phone, media_type, size = parse_slide_metadata(slide)
+                # Slide Text Parsing
+                slide_text = extract_slide_text(slide)
+                outlet_name, contact_no, type_val, size_val = parse_slide_data(slide_text)
 
-                # Slide Shapes se Image Coordinates & Embedded Image bounding boxes detect karna
-                image_shapes = []
+                # Extract Images based on Left-to-Right layout
+                images = []
                 for shape in slide.shapes:
-                    if shape.shape_type == 13: # Picture shape
-                        image_shapes.append(shape)
+                    if shape.shape_type == 13:  # Picture shape
+                        images.append((shape.left, shape.image))
 
-                # Left to Right sort karna based on 'left' coordinate
-                image_shapes.sort(key=lambda s: s.left)
+                # Sort pictures left to right
+                images.sort(key=lambda x: x[0])
 
-                if len(image_shapes) >= 1:
-                    # PPT Slide Width & Height
-                    slide_width = prs.slide_width
-                    slide_height = prs.slide_height
+                selected_targets = []
+                if image_position == "Left Image" and len(images) >= 1:
+                    selected_targets.append(("LEFT", images[0][1]))
+                elif image_position == "Right Image" and len(images) >= 2:
+                    selected_targets.append(("RIGHT", images[1][1]))
+                elif image_position == "Dono (Both)":
+                    if len(images) >= 1:
+                        selected_targets.append(("LEFT", images[0][1]))
+                    if len(images) >= 2:
+                        selected_targets.append(("RIGHT", images[1][2] if len(images) > 1 else images[0][1]))
 
-                    targets = []
-                    if image_position == "Left Image" and len(image_shapes) >= 1:
-                        targets.append(("LEFT", image_shapes[0]))
-                    elif image_position == "Right Image" and len(image_shapes) >= 2:
-                        targets.append(("RIGHT", image_shapes[1]))
-                    elif image_position == "Dono (Both)":
-                        if len(image_shapes) >= 1:
-                            targets.append(("LEFT", image_shapes[0]))
-                        if len(image_shapes) >= 2:
-                            targets.append(("RIGHT", image_shapes[1]))
+                for pos_tag, img_obj in selected_targets:
+                    # Construct exact filename format
+                    if image_position == "Dono (Both)":
+                        filename = f"{outlet_name}_{contact_no}_{type_val}_{size_val}_{pos_tag}.jpg"
+                    else:
+                        filename = f"{outlet_name}_{contact_no}_{type_val}_{size_val}.jpg"
 
-                    for pos_label, shape in targets:
-                        # File Renaming Format
-                        if image_position == "Dono (Both)":
-                            file_name = f"{name}_{phone}_{media_type}_{size}_{pos_label}.jpg"
-                        else:
-                            file_name = f"{name}_{phone}_{media_type}_{size}.jpg"
-
-                        # Extract original image blob as cropped visual area fallback
-                        # High-resolution image screenshot crop
-                        img_bytes = shape.image.blob
-                        zip_file.writestr(file_name, img_bytes)
-                        processed_count += 1
+                    zip_file.writestr(filename, img_obj.blob)
+                    processed_count += 1
 
                 progress_bar.progress((i + 1) / total_slides)
 
-        status_text.success(f"Processing Complete! Total {processed_count} images cropped & extracted.")
+        status_text.success(f"Successfully processed {processed_count} images!")
 
-        # Download ZIP Button
+        # ZIP Download Button
         st.download_button(
-            label="📦 Cropped Screenshots ZIP Download Karein",
+            label="📦 Download Renamed Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Cropped_Slide_Images.zip",
+            file_name="Renamed_Images.zip",
             mime="application/zip"
         )
