@@ -99,8 +99,8 @@ def extract_info_from_slide(slide):
     return outlet_name, contact_no, media_type, size
 
 
-def process_image_with_strict_marking(pic_shape, slide):
-    """Strict Overlay Bounding - No Random Extra Lines"""
+def process_image_with_clean_marking(pic_shape, slide):
+    """Draws overlay box ONLY inside the cropped image boundary."""
     image_bytes = io.BytesIO(pic_shape.image.blob)
     pil_img = Image.open(image_bytes).convert("RGB")
     draw = ImageDraw.Draw(pil_img)
@@ -113,7 +113,7 @@ def process_image_with_strict_marking(pic_shape, slide):
     img_w, img_h = pil_img.size
 
     for shape in slide.shapes:
-        # Check if shape is an overlay rectangle/box placed specifically ON this image
+        # Detect shapes overlaying directly on top of the picture
         if shape != pic_shape and shape.shape_type != 13:
             s_left = shape.left
             s_top = shape.top
@@ -123,29 +123,29 @@ def process_image_with_strict_marking(pic_shape, slide):
             p_right = pic_left + pic_width
             p_bottom = pic_top + pic_height
 
-            # Strict overlap filter (Ignores outside borders/lines)
+            # Check overlap area
             overlap_left = max(s_left, pic_left)
             overlap_top = max(s_top, pic_top)
             overlap_right = min(s_right, p_right)
             overlap_bottom = min(s_bottom, p_bottom)
 
-            # Only consider if shape covers meaningful area inside image
+            # Draw rectangle only if shape overlaps meaningfully inside image
             if overlap_right > overlap_left and overlap_bottom > overlap_top:
+                # Relative position inside the image canvas
                 rel_x1 = int(((overlap_left - pic_left) / pic_width) * img_w)
                 rel_y1 = int(((overlap_top - pic_top) / pic_height) * img_h)
                 rel_x2 = int(((overlap_right - pic_left) / pic_width) * img_w)
                 rel_y2 = int(((overlap_bottom - pic_top) / pic_height) * img_h)
 
-                # Ensure dimensions are valid inside image bounds
-                if (rel_x2 - rel_x1) > 10 and (rel_y2 - rel_y1) > 10:
-                    line_thickness = max(6, int(img_w / 90))
-                    
-                    # Lock borders strictly within image dimensions
-                    rel_x1 = max(line_thickness // 2, rel_x1)
-                    rel_y1 = max(line_thickness // 2, rel_y1)
-                    rel_x2 = min(img_w - line_thickness // 2, rel_x2)
-                    rel_y2 = min(img_h - line_thickness // 2, rel_y2)
+                line_thickness = max(6, int(img_w / 80))
 
+                # Clamp boundaries so lines don't leak outside image edge
+                rel_x1 = max(line_thickness // 2, rel_x1)
+                rel_y1 = max(line_thickness // 2, rel_y1)
+                rel_x2 = min(img_w - line_thickness // 2, rel_x2)
+                rel_y2 = min(img_h - line_thickness // 2, rel_y2)
+
+                if (rel_x2 - rel_x1) > 15 and (rel_y2 - rel_y1) > 15:
                     draw.rectangle(
                         [rel_x1, rel_y1, rel_x2, rel_y2],
                         outline="red",
@@ -207,7 +207,7 @@ if uploaded_file is not None:
                         base_filename = "_".join(components) + suffix
                         final_name = f"{base_filename}.jpg"
 
-                        final_image_data = process_image_with_strict_marking(pic, slide)
+                        final_image_data = process_image_with_clean_marking(pic, slide)
                         zip_file.writestr(final_name, final_image_data)
                         processed_count += 1
 
