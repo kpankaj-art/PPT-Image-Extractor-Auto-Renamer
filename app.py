@@ -1,19 +1,18 @@
 import io
 import re
 import zipfile
-import gc  # Memory optimization ke liye
+import gc
 import fitz  # PyMuPDF
 import streamlit as st
 from PIL import Image
 
-st.set_page_config(page_title="PDF Target Image Extractor", page_icon="🖼️", layout="wide")
+st.set_page_config(page_title="PDF Precision Cropper", page_icon="🖼️", layout="wide")
 
-st.title("🖼️ Exact Right Image Cropper")
-st.write("PDF upload karein aur slides ke andar se sirf Right Photo ko crop karein.")
+st.title("🖼️ Exact Right Image Auto-Cropper (Full PDF Support)")
+st.write("Upload PDF to extract exact cropped images without missing any slide.")
 
-# Settings Sidebar
 st.sidebar.header("Crop Controls")
-target_pos = st.sidebar.radio("Konsi Photo Crop Karni Hai?", ["Right Image Box", "Left Image Box"])
+target_pos = st.sidebar.radio("Konsi Photo Crop Karni Hai?", ["Right Image", "Left Image"])
 
 uploaded_pdf = st.file_uploader("📄 PDF File Upload Karein (.pdf)", type=["pdf"])
 
@@ -50,7 +49,7 @@ if uploaded_pdf is not None:
     total_pages = len(doc)
     st.success(f"✅ Total Pages/Slides Found: {total_pages}")
 
-    if st.button("🚀 Start Precision Cropping"):
+    if st.button("🚀 Process ALL Slides"):
         zip_buffer = io.BytesIO()
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -64,7 +63,6 @@ if uploaded_pdf is not None:
                 text = page.get_text("text")
                 outlet_name, contact_no, media_type, size = extract_metadata(text)
 
-                # Naming format
                 components = []
                 if outlet_name:
                     components.append(outlet_name)
@@ -79,39 +77,44 @@ if uploaded_pdf is not None:
 
                 final_name = "_".join(components) + ".jpg"
 
-                # High Resolution Render (Matrix 2.5)
-                mat = fitz.Matrix(2.5, 2.5)
+                # High Quality Page Pixmap Render
+                mat = fitz.Matrix(2.0, 2.0)
                 pix = page.get_pixmap(matrix=mat)
                 img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 
-                w, h = img.size
+                # Slide ke embedded images ki exact positions detect karna
+                images_info = page.get_image_info()
+                
+                cropped_img = None
+                
+                if len(images_info) >= 2:
+                    # Sort images Left to Right
+                    sorted_imgs = sorted(images_info, key=lambda x: x['bbox'][0])
+                    
+                    selected_info = sorted_imgs[1] if target_pos == "Right Image" else sorted_imgs[0]
+                    bbox = selected_info['bbox']
+                    
+                    # Convert bounding box to scaled pixels
+                    x0 = int(bbox[0] * 2.0)
+                    y0 = int(bbox[1] * 2.0)
+                    x1 = int(bbox[2] * 2.0)
+                    y1 = int(bbox[3] * 2.0)
 
-                # Exact Photo Bounding Box Coordinates (Percentages relative to page size)
-                if target_pos == "Right Image Box":
-                    # Exact Crop for Right Image (Far View Box)
-                    crop_box = (
-                        int(w * 0.505), # Left
-                        int(h * 0.380), # Top
-                        int(w * 0.730), # Right
-                        int(h * 0.770)  # Bottom
-                    )
-                else:
-                    # Crop for Left Image (Close View Box)
-                    crop_box = (
-                        int(w * 0.260), # Left
-                        int(h * 0.380), # Top
-                        int(w * 0.485), # Right
-                        int(h * 0.770)  # Bottom
-                    )
+                    cropped_img = img.crop((x0, y0, x1, y1))
 
-                cropped_img = img.crop(crop_box)
+                # Dynamic fallback agar embedded bbox read na ho paye
+                if cropped_img is None or cropped_img.width < 50:
+                    w, h = img.size
+                    if target_pos == "Right Image":
+                        crop_box = (int(w * 0.50), int(h * 0.35), int(w * 0.74), int(h * 0.78))
+                    else:
+                        crop_box = (int(w * 0.25), int(h * 0.35), int(w * 0.49), int(h * 0.78))
+                    cropped_img = img.crop(crop_box)
 
-                # Save cropped image to buffer
                 img_byte_arr = io.BytesIO()
-                cropped_img.save(img_byte_arr, format="JPEG", quality=95)
+                cropped_img.save(img_byte_arr, format="JPEG", quality=90)
                 zip_file.writestr(final_name, img_byte_arr.getvalue())
 
-                # RAM Cleanup
                 del pix
                 del img
                 del cropped_img
@@ -122,10 +125,10 @@ if uploaded_pdf is not None:
         gc.collect()
 
         status_text.text("Processing Complete!")
-        st.success(f"🎉 Successfully cropped all {total_pages} right images!")
+        st.success(f"🎉 Successfully processed ALL {total_pages} slides!")
         st.download_button(
             label="📥 Download Cropped Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Cropped_Right_Images.zip",
+            file_name="Cropped_Right_Images_All.zip",
             mime="application/zip",
         )
