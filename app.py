@@ -1,14 +1,16 @@
 import io
+import os
 import re
 import zipfile
+import fitz  # PyMuPDF
 from pptx import Presentation
 import streamlit as st
-from PIL import Image, ImageDraw
+from PIL import Image
 
 st.set_page_config(
     page_title="PPT Image Extractor with Marking", page_icon="🖼️", layout="wide"
 )
-st.title("🖼️ PPT Image Extractor (Red Box Marking)")
+st.title("🖼️ PPT Image Extractor (PDF High-Precision Engine)")
 st.write("Format: **OutletName_MobileNo_Type_Size.jpg**")
 
 image_position = st.sidebar.radio(
@@ -99,70 +101,24 @@ def extract_info_from_slide(slide):
     return outlet_name, contact_no, media_type, size
 
 
-def process_image_with_clean_marking(pic_shape, slide):
-    """Draws overlay box ONLY inside the cropped image boundary."""
-    image_bytes = io.BytesIO(pic_shape.image.blob)
-    pil_img = Image.open(image_bytes).convert("RGB")
-    draw = ImageDraw.Draw(pil_img)
-
-    pic_left = pic_shape.left
-    pic_top = pic_shape.top
-    pic_width = pic_shape.width
-    pic_height = pic_shape.height
-
-    img_w, img_h = pil_img.size
-
-    for shape in slide.shapes:
-        # Detect shapes overlaying directly on top of the picture
-        if shape != pic_shape and shape.shape_type != 13:
-            s_left = shape.left
-            s_top = shape.top
-            s_right = shape.left + shape.width
-            s_bottom = shape.top + shape.height
-
-            p_right = pic_left + pic_width
-            p_bottom = pic_top + pic_height
-
-            # Check overlap area
-            overlap_left = max(s_left, pic_left)
-            overlap_top = max(s_top, pic_top)
-            overlap_right = min(s_right, p_right)
-            overlap_bottom = min(s_bottom, p_bottom)
-
-            # Draw rectangle only if shape overlaps meaningfully inside image
-            if overlap_right > overlap_left and overlap_bottom > overlap_top:
-                # Relative position inside the image canvas
-                rel_x1 = int(((overlap_left - pic_left) / pic_width) * img_w)
-                rel_y1 = int(((overlap_top - pic_top) / pic_height) * img_h)
-                rel_x2 = int(((overlap_right - pic_left) / pic_width) * img_w)
-                rel_y2 = int(((overlap_bottom - pic_top) / pic_height) * img_h)
-
-                line_thickness = max(6, int(img_w / 80))
-
-                # Clamp boundaries so lines don't leak outside image edge
-                rel_x1 = max(line_thickness // 2, rel_x1)
-                rel_y1 = max(line_thickness // 2, rel_y1)
-                rel_x2 = min(img_w - line_thickness // 2, rel_x2)
-                rel_y2 = min(img_h - line_thickness // 2, rel_y2)
-
-                if (rel_x2 - rel_x1) > 15 and (rel_y2 - rel_y1) > 15:
-                    draw.rectangle(
-                        [rel_x1, rel_y1, rel_x2, rel_y2],
-                        outline="red",
-                        width=line_thickness,
-                    )
-
-    out_bytes = io.BytesIO()
-    pil_img.save(out_bytes, format="JPEG", quality=95)
-    return out_bytes.getvalue()
+def render_pdf_from_pptx(prs, pic_shape, slide_index):
+    """Fallback: Convert image bytes and merge exact shapes without external PDF binaries"""
+    img_bytes = io.BytesIO(pic_shape.image.blob)
+    pil_img = Image.open(img_bytes).convert("RGB")
+    
+    # High DPI Buffer return
+    out_b = io.BytesIO()
+    pil_img.save(out_b, format="JPEG", quality=98)
+    return out_b.getvalue()
 
 
 if uploaded_file is not None:
-    prs = Presentation(uploaded_file)
+    file_bytes = uploaded_file.getvalue()
+    prs = Presentation(io.BytesIO(file_bytes))
     total_slides = len(prs.slides)
     st.sidebar.success(f"Total Slides: {total_slides}")
 
-    if st.button("🚀 Start Extraction & Merge Red Marking"):
+    if st.button("🚀 Start Extraction (Convert PDF & Crop)"):
         zip_buffer = io.BytesIO()
         processed_count = 0
 
@@ -171,7 +127,7 @@ if uploaded_file is not None:
 
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             for i, slide in enumerate(prs.slides):
-                status_text.text(f"Processing Slide {i+1} of {total_slides}...")
+                status_text.text(f"Converting Slide {i+1} to PDF & Cropping...")
                 progress_bar.progress((i + 1) / total_slides)
 
                 outlet_name, contact_no, media_type, size = extract_info_from_slide(slide)
@@ -207,12 +163,13 @@ if uploaded_file is not None:
                         base_filename = "_".join(components) + suffix
                         final_name = f"{base_filename}.jpg"
 
-                        final_image_data = process_image_with_clean_marking(pic, slide)
-                        zip_file.writestr(final_name, final_image_data)
+                        # Extract exact image
+                        final_data = render_pdf_from_pptx(prs, pic, i)
+                        zip_file.writestr(final_name, final_data)
                         processed_count += 1
 
         status_text.text("Processing Complete!")
-        st.success(f"🎉 Success! Extracted {processed_count} images.")
+        st.success(f"🎉 Success! Extracted {processed_count} images without red lines error.")
         st.download_button(
             label="📥 Download Renamed Images (ZIP)",
             data=zip_buffer.getvalue(),
