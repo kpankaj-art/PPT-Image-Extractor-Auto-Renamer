@@ -8,32 +8,31 @@ from PIL import Image
 from google import genai
 from google.genai import types
 
-st.set_page_config(page_title="PPT Direct Image Extractor", page_icon="🖼️", layout="wide")
+st.set_page_config(page_title="PPT Image Extractor", page_icon="📊", layout="wide")
 
-st.title("🖼️ Direct PPT Right Image Extractor (Gemini AI)")
-st.write("PPT upload karein aur Red Box Marking/Stamp ke sath exact Far View Image crop karein.")
+st.title("📊 PowerPoint (.PPTX) Right Image Extractor")
+st.write("Apni PPT file upload karein. Gemini AI automatically red markings merge karke sirf Right Photo crop karega.")
 
-# Read API Key from Streamlit Secrets or Sidebar
+# Read Gemini API Key from Streamlit Secrets
 api_key = st.secrets.get("GEMINI_API_KEY") or st.sidebar.text_input("Gemini API Key", type="password")
 
 if not api_key:
     st.error("⚠️ GEMINI_API_KEY Streamlit Secrets me nahi mila! Kripya Settings -> Secrets check karein.")
     st.stop()
 
-# Initialize Gemini Client
 client = genai.Client(api_key=api_key)
 
-# Direct PPT File Uploader
-uploaded_ppt = st.file_uploader("📊 PPTX File Upload Karein (.pptx)", type=["pptx"])
+# STRICT PPTX ONLY UPLOADER
+uploaded_ppt = st.file_uploader("📂 Select PowerPoint File (.pptx)", type=["pptx"])
 
 def get_slide_merged_canvas(slide, slide_width, slide_height, scale=2.0):
-    """Slide ki base image aur top overlay shapes (Red boxes) ko ek canvas par merge karta hai"""
+    """PPT Shapes & Overlays (Red Box) ko ek canvas par merge karna"""
     canvas_w = int(slide_width * scale)
     canvas_h = int(slide_height * scale)
     canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
     
     for shape in slide.shapes:
-        if shape.shape_type == 13:  # Picture shape in PPT
+        if shape.shape_type == 13:  # Picture shape
             try:
                 img_data = io.BytesIO(shape.image.blob)
                 sub_img = Image.open(img_data).convert("RGBA")
@@ -51,19 +50,19 @@ def get_slide_merged_canvas(slide, slide_width, slide_height, scale=2.0):
     return canvas
 
 def call_gemini_vision(canvas_img, slide_text, slide_num):
-    """Gemini 2.5 Flash Vision Model se Bounding Box aur Metadata mangwana"""
+    """Gemini 2.5 Flash se Right Photo Bounding Box aur Filename details lena"""
     prompt = f"""
-    This is presentation Slide {slide_num}. Text on slide: "{slide_text}"
+    This is PowerPoint Slide {slide_num}. Text found: "{slide_text}"
 
-    Analyze this rendered slide image:
+    Analyze this slide image:
     1. Extract "outlet_name": Name of the Shop/Outlet.
     2. Extract "contact_no": 10-digit Mobile Number.
     3. Extract "media_type": Type like NL, FL, BL, GSB, FLEX.
-    4. Extract "size": Dimensions (e.g. 10x2).
-    5. Locate ONLY the RIGHT SIDE / FAR VIEW photo box (including red markings/boxes and geotag map stamps inside it).
-       Return "box_2d": Normalized bounding box coordinates [ymin, xmin, ymax, xmax] (scale 0 to 1000).
+    4. Extract "size": Board dimensions (e.g. 10x2).
+    5. Locate ONLY the RIGHT SIDE / FAR VIEW photo box (including red box markings and geotag map stamps inside it).
+       Return "box_2d": Bounding box coordinates [ymin, xmin, ymax, xmax] (scale 0 to 1000).
 
-    Return ONLY raw JSON format:
+    Return ONLY raw JSON:
     {{
         "outlet_name": "STRING",
         "contact_no": "STRING",
@@ -92,16 +91,16 @@ def call_gemini_vision(canvas_img, slide_text, slide_num):
 if uploaded_ppt is not None:
     prs = Presentation(uploaded_ppt)
     total_slides = len(prs.slides)
-    st.sidebar.success(f"✅ Total Slides: {total_slides}")
+    st.sidebar.success(f"✅ Total PPT Slides: {total_slides}")
 
     slide_w = prs.slide_width
     slide_h = prs.slide_height
 
-    # Sidebar batch selection to avoid Streamlit memory timeout
+    # Batch Range Selector
     start_slide = st.sidebar.number_input("Start Slide", min_value=1, max_value=total_slides, value=1)
     end_slide = st.sidebar.number_input("End Slide", min_value=1, max_value=total_slides, value=min(total_slides, 50))
 
-    if st.button("🚀 Merge Markings & Process PPT Slides"):
+    if st.button("🚀 Process PPT Slides & Extract Images"):
         zip_buffer = io.BytesIO()
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -112,10 +111,10 @@ if uploaded_ppt is not None:
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             for idx, i in enumerate(slides_range):
                 slide = prs.slides[i]
-                status_text.text(f"Processing Slide {i+1} of {total_slides}...")
+                status_text.text(f"Processing PPT Slide {i+1} of {total_slides}...")
                 progress_bar.progress((idx + 1) / total_batch)
 
-                # Collect all text on slide
+                # PPT Text Extraction
                 slide_text = []
                 for shape in slide.shapes:
                     if shape.has_text_frame:
@@ -124,7 +123,7 @@ if uploaded_ppt is not None:
                                 slide_text.append(p.text.strip())
                 full_text = " ".join(slide_text)
 
-                # Render Canvas Image (Base image + Red overlays merged)
+                # PPT Image Canvas Render
                 canvas_img = get_slide_merged_canvas(slide, slide_w, slide_h, scale=2.0)
                 cw, ch = canvas_img.size
 
@@ -151,13 +150,12 @@ if uploaded_ppt is not None:
                         )
                         cropped = canvas_img.crop(crop_coords)
                     else:
-                        # Dynamic Fallback for Right Image
                         cropped = canvas_img.crop((int(cw * 0.50), int(ch * 0.35), int(cw * 0.74), int(ch * 0.78)))
                 else:
                     filename = f"SLIDE_{i+1}.jpg"
                     cropped = canvas_img.crop((int(cw * 0.50), int(ch * 0.35), int(cw * 0.74), int(ch * 0.78)))
 
-                # Save cropped image to ZIP
+                # Save cropped image into ZIP
                 out_b = io.BytesIO()
                 cropped.save(out_b, format="JPEG", quality=92)
                 zip_file.writestr(filename, out_b.getvalue())
@@ -167,10 +165,10 @@ if uploaded_ppt is not None:
                 gc.collect()
 
         status_text.text("Processing Complete!")
-        st.success(f"🎉 Successfully processed slides {start_slide} to {end_slide}!")
+        st.success(f"🎉 Processed slides {start_slide} to {end_slide} successfully!")
         st.download_button(
-            label=f"📥 Download Cropped Images (ZIP)",
+            label="📥 Download PPT Cropped Images (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name=f"PPT_Cropped_Images_{start_slide}_to_{end_slide}.zip",
+            file_name=f"PPT_Cropped_{start_slide}_to_{end_slide}.zip",
             mime="application/zip",
         )
