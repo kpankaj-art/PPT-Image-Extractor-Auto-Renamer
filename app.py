@@ -623,8 +623,8 @@ st.write(
 )
 
 st.info(
-    "यह tool PowerPoint के Ink/markup के fallback image को पहचानकर "
-    "उसी photo पर सही position में merge करता है."
+    "This tool identifies the fallback image for PowerPoint's Ink/markup "
+    "It merges it onto the same photo at the correct position."
 )
 
 uploaded_file = st.file_uploader(
