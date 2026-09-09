@@ -18,13 +18,11 @@ def extract_metadata(slide):
         if shape.has_text_frame:
             text_data += " " + shape.text_frame.text
 
-    # Default values
     outlet_name = "OUTLET"
     contact = "0000000000"
     media_type = "NL"
     size = "0x0"
 
-    # Regex Extraction
     outlet_match = re.search(
         r"Outlet Name:\s*([^\n\r]+)", text_data, re.IGNORECASE
     )
@@ -77,7 +75,6 @@ if uploaded_file is not None:
                             image_bytes = shape.image.blob
                             image_ext = shape.image.ext
 
-                            # Correct format naming
                             final_name = f"{filename_prefix}_{img_idx}.{image_ext}"
                             zip_file.writestr(final_name, image_bytes)
                             img_idx += 1
