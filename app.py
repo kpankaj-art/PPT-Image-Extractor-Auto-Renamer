@@ -1,10 +1,9 @@
 import io
 import os
+import subprocess
 import tempfile
 import zipfile
-from PIL import Image
-from pptx import Presentation
-from pptx.enum.shapes import MSO_SHAPE_TYPE
+import fitz  # PyMuPDF (Ultra Lightweight)
 import streamlit as st
 
 st.set_page_config(page_title="Lite PPT Extractor", layout="centered")
@@ -15,62 +14,56 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    if st.button("Convert to Images"):
-        with st.spinner("Processing (Low Memory Mode)..."):
+    if st.button("Convert to Images (With Markings)"):
+        with st.spinner("Processing slides with markings..."):
             try:
-                prs = Presentation(uploaded_file)
-                zip_buffer = io.BytesIO()
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    ppt_path = os.path.join(temp_dir, "input.pptx")
+                    pdf_path = os.path.join(temp_dir, "input.pdf")
 
-                with zipfile.ZipFile(
-                    zip_buffer, "a", zipfile.ZIP_DEFLATED, False
-                ) as zip_file:
-                    for idx, slide in enumerate(prs.slides):
-                        slide_width = int(prs.slide_width.pt)
-                        slide_height = int(prs.slide_height.pt)
+                    # PPTX file temporarily save karein
+                    with open(ppt_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
 
-                        # Blank Image Base
-                        img = Image.new(
-                            "RGB", (slide_width, slide_height), "white"
-                        )
+                    # Headless/No-GUI mode se PDF banayein (Low RAM)
+                    subprocess.run(
+                        [
+                            "soffice",
+                            "--headless",
+                            "--convert-to",
+                            "pdf",
+                            ppt_path,
+                            "--outdir",
+                            temp_dir,
+                        ],
+                        check=True,
+                    )
 
-                        for shape in slide.shapes:
-                            # Correct way to check for picture shapes
-                            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                                image_bytes = shape.image.blob
-                                shape_img = Image.open(io.BytesIO(image_bytes))
+                    # PyMuPDF se PDF pages ko image mein convert karein
+                    doc = fitz.open(pdf_path)
+                    zip_buffer = io.BytesIO()
 
-                                # Resize to shape dimensions
-                                shape_img = shape_img.resize(
-                                    (
-                                        max(1, int(shape.width.pt)),
-                                        max(1, int(shape.height.pt)),
-                                    )
-                                )
+                    with zipfile.ZipFile(
+                        zip_buffer, "a", zipfile.ZIP_DEFLATED, False
+                    ) as zip_file:
+                        for idx, page in enumerate(doc):
+                            # Resolution set karein (1.5x scale low RAM ke liye perfect hai)
+                            pix = page.get_pixmap(dpi=150)
+                            img_data = pix.tobytes("png")
 
-                                # Paste image on canvas
-                                img.paste(
-                                    shape_img,
-                                    (
-                                        int(shape.left.pt),
-                                        int(shape.top.pt),
-                                    ),
-                                )
+                            zip_file.writestr(
+                                f"slide_{idx + 1}_marked.png", img_data
+                            )
 
-                        # Save slide as PNG
-                        img_byte_arr = io.BytesIO()
-                        img.save(img_byte_arr, format="PNG", quality=85)
-                        zip_file.writestr(
-                            f"slide_{idx + 1}_merged.png",
-                            img_byte_arr.getvalue(),
-                        )
-
-                st.success("Conversion Complete!")
-                st.download_button(
-                    label="Download Merged Images (ZIP)",
-                    data=zip_buffer.getvalue(),
-                    file_name="marked_slides.zip",
-                    mime="application/zip",
-                )
+                    st.success(
+                        f"Total {len(doc)} slides successfully extracted with markings!"
+                    )
+                    st.download_button(
+                        label="Download Merged Images (ZIP)",
+                        data=zip_buffer.getvalue(),
+                        file_name="marked_slides.zip",
+                        mime="application/zip",
+                    )
 
             except Exception as e:
-                st.error(f"Error processing file: {str(e)}")
+                st.error(f"Error: {str(e)}")
