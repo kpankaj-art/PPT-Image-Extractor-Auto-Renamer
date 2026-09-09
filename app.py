@@ -1,14 +1,13 @@
 import io
 import re
 import zipfile
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
-from pptx.util import Inches, Pt
 import streamlit as st
 from datetime import datetime
 
-# ✅ FIRST - Page config (sirf ek baar chalega)
+# ✅ Page config (sirf ek baar)
 if "page_loaded" not in st.session_state:
     st.set_page_config(
         page_title="PPT Far-View Extractor",
@@ -17,7 +16,7 @@ if "page_loaded" not in st.session_state:
     )
     st.session_state.page_loaded = True
 
-st.title("📸 PPT Right-Side Image Extractor with Markup")
+st.title("📸 PPT Image Extractor with Markup Merge")
 
 # ============ FUNCTIONS ============
 
@@ -80,79 +79,76 @@ def extract_metadata_from_slide(slide):
     }
 
 
-def get_slide_markup_image(slide, slide_width):
-    """Puri slide ka screenshot lena - marking ke saath"""
-    try:
-        from pptx.enum.dml import MSO_THEME_COLOR
-        import os
-        
-        # Slide ko temporary PNG me save karna
-        temp_path = "/tmp/slide_temp.png"
-        
-        # LibreOffice/PIL se slide render nahi kar sakte directly
-        # Toh hum slide ke saare shapes ke upar drawing karenge
-        
-        # Create a new image with slide dimensions
-        slide_width_px = int(slide_width / 914400 * 96)  # EMU to pixels
-        slide_height_px = int(slide.slide_height / 914400 * 96)
-        
-        # White background
-        slide_img = Image.new('RGB', (slide_width_px, slide_height_px), 'white')
-        draw = ImageDraw.Draw(slide_img)
-        
-        # Draw all shapes
-        for shape in slide.shapes:
-            try:
-                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                    # Draw picture at correct position
-                    pass
-                elif shape.has_text_frame:
-                    # Draw text on image
-                    x = int(shape.left / 914400 * 96)
-                    y = int(shape.top / 914400 * 96)
-                    text = shape.text_frame.text
-                    if text:
-                        draw.text((x, y), text, fill='black')
-            except:
-                pass
-        
-        return slide_img
-    except:
-        return None
+def get_all_slide_text(slide):
+    """Slide se sabhi text ko collect karna"""
+    all_text = []
+    for shape in slide.shapes:
+        if shape.has_text_frame and shape.shape_type != MSO_SHAPE_TYPE.PICTURE:
+            text = shape.text_frame.text.strip()
+            if text:
+                all_text.append(text)
+    return all_text
 
 
-def merge_image_with_markup(image_bytes, slide, slide_width):
-    """Image ko slide ke markup/marking ke saath merge karna"""
+def add_text_overlay_to_image(image_bytes, text_list):
+    """Image ke top-left pe text ko overlay karna"""
     try:
         img = Image.open(io.BytesIO(image_bytes))
         
-        # Get slide markup
-        markup_img = get_slide_markup_image(slide, slide_width)
+        # Convert to RGB agar RGBA hai
+        if img.mode in ('RGBA', 'LA', 'P'):
+            img = img.convert('RGB')
         
-        if markup_img:
-            # Resize markup to match image
-            markup_resized = markup_img.resize(img.size, Image.Resampling.LANCZOS)
-            
-            # Create a composite - overlay markup on image
-            # Use 30% opacity for markup so image is still visible
-            markup_resized.putalpha(int(255 * 0.3))
-            
-            result_img = img.convert('RGBA')
-            result_img.paste(markup_resized, (0, 0), markup_resized)
-            result_img = result_img.convert('RGB')
-            
-            output = io.BytesIO()
-            result_img.save(output, format='PNG', quality=90)
-            output.seek(0)
-            return output.getvalue()
-    except Exception as e:
-        st.warning(f"Merge error: {e}")
+        # Create overlay layer
+        overlay = Image.new('RGBA', img.size, (0, 0, 0, 0))
+        overlay_draw = ImageDraw.Draw(overlay)
+        
+        # Add text
+        y_position = 10
+        for text_line in text_list[:10]:  # Max 10 lines
+            try:
+                # Try to use a font, fallback to default
+                try:
+                    font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 16)
+                except:
+                    font = ImageFont.load_default()
+                
+                # Get text bounding box
+                bbox = overlay_draw.textbbox((10, y_position), text_line, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+                
+                # Draw semi-transparent background
+                overlay_draw.rectangle(
+                    [10 - 5, y_position - 5, text_width + 15, y_position + text_height + 5],
+                    fill=(0, 0, 0, 180)
+                )
+                
+                # Draw white text
+                overlay_draw.text((10, y_position), text_line, font=font, fill=(255, 255, 255, 255))
+                
+                y_position += text_height + 10
+            except:
+                pass
+        
+        # Composite overlay on original image
+        img = img.convert('RGBA')
+        img.paste(overlay, (0, 0), overlay)
+        img = img.convert('RGB')
+        
+        # Save
+        output = io.BytesIO()
+        img.save(output, format='PNG', quality=90)
+        output.seek(0)
+        return output.getvalue()
     
-    return image_bytes
+    except Exception as e:
+        st.warning(f"Text overlay error: {e}")
+        return image_bytes
 
 
 def process_ppt_file_with_markup(uploaded_file, merge_markup_flag):
-    """PPT processing with markup merge"""
+    """PPT processing with text/markup merge"""
     try:
         prs = Presentation(uploaded_file)
         zip_buffer = io.BytesIO()
@@ -160,7 +156,6 @@ def process_ppt_file_with_markup(uploaded_file, merge_markup_flag):
         total_slides = len(prs.slides)
         
         slide_width = prs.slide_width
-        slide_height = prs.slide_height
         
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -174,14 +169,11 @@ def process_ppt_file_with_markup(uploaded_file, merge_markup_flag):
                 
                 metadata = extract_metadata_from_slide(slide)
                 filename_prefix = metadata["filename_prefix"]
-                img_idx = 1
                 
-                # Get all text/shapes from slide for markup
-                slide_text_elements = []
-                for shape in slide.shapes:
-                    if shape.has_text_frame and shape.shape_type != MSO_SHAPE_TYPE.PICTURE:
-                        if shape.text.strip():
-                            slide_text_elements.append(shape.text)
+                # Get all text from slide
+                slide_text = get_all_slide_text(slide)
+                
+                img_idx = 1
                 
                 for shape in slide.shapes:
                     if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
@@ -191,9 +183,9 @@ def process_ppt_file_with_markup(uploaded_file, merge_markup_flag):
                                 image_bytes = shape.image.blob
                                 image_ext = shape.image.ext
                                 
-                                # Merge with markup agar toggle on hai
-                                if merge_markup_flag:
-                                    image_bytes = merge_image_with_markup(image_bytes, slide, slide_width)
+                                # Add text overlay agar toggle on hai
+                                if merge_markup_flag and slide_text:
+                                    image_bytes = add_text_overlay_to_image(image_bytes, slide_text)
                                 
                                 final_name = f"{filename_prefix}_{img_idx}.{image_ext}"
                                 zip_file.writestr(final_name, image_bytes)
@@ -205,7 +197,7 @@ def process_ppt_file_with_markup(uploaded_file, merge_markup_flag):
                                     "contact": metadata["contact"],
                                     "type": metadata["media_type"],
                                     "size": metadata["size"],
-                                    "markup": "✅ Yes" if merge_markup_flag else "❌ No"
+                                    "markup": "✅ Yes" if (merge_markup_flag and slide_text) else "❌ No"
                                 })
                                 
                                 img_idx += 1
@@ -224,15 +216,15 @@ def process_ppt_file_with_markup(uploaded_file, merge_markup_flag):
 # ============ SIDEBAR ============
 
 st.sidebar.header("⚙️ Settings")
-merge_markup = st.sidebar.checkbox("✅ Merge Markup/Text with Image", value=True)
+merge_markup = st.sidebar.checkbox("✅ Merge Slide Text/Markup with Image", value=True)
 
 st.sidebar.markdown("""
 ### 📋 Features:
 ✓ Extract right-side images
-✓ Auto metadata extraction  
-✓ Merge with slide markup
-✓ Smart naming
-✓ Lightweight
+✓ Get all slide text/markup
+✓ Overlay text on images  
+✓ Auto metadata naming
+✓ Lightweight & Fast
 """)
 
 
@@ -255,7 +247,7 @@ if uploaded_file is not None:
                 zip_buffer, extracted_data = process_ppt_file_with_markup(uploaded_file, merge_markup)
                 
                 if extracted_data:
-                    st.success(f"✅ {len(extracted_data)} images extracted with markup!")
+                    st.success(f"✅ {len(extracted_data)} images extracted with markup overlays!")
                     
                     # Table
                     st.subheader("📊 Results")
@@ -276,7 +268,7 @@ if uploaded_file is not None:
                     st.download_button(
                         "⬇️ Download ZIP",
                         zip_buffer.getvalue(),
-                        f"images_markup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                        f"images_marked_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
                         "application/zip",
                         use_container_width=True,
                         type="primary"
@@ -285,36 +277,38 @@ if uploaded_file is not None:
                     # Stats
                     col1, col2, col3 = st.columns(3)
                     with col1:
-                        st.metric("Total", len(extracted_data))
+                        st.metric("Total Images", len(extracted_data))
                     with col2:
-                        st.metric("Outlets", len(set([i["outlet"] for i in extracted_data])))
+                        st.metric("Unique Outlets", len(set([i["outlet"] for i in extracted_data])))
                     with col3:
-                        st.metric("With Markup", sum(1 for i in extracted_data if i["markup"] == "✅ Yes"))
+                        with_markup = sum(1 for i in extracted_data if i["markup"] == "✅ Yes")
+                        st.metric("With Markup", with_markup)
                 
                 else:
                     st.warning("⚠️ No images found!")
 
 else:
     st.info("""
-    ### 👋 Welcome!
+    ### 👋 Welcome to PPT Image Extractor!
     
     **What this tool does:**
-    ✓ Extract right-side images from PowerPoint
-    ✓ Merge with slide markup/text/shapes
-    ✓ Auto-name based on metadata  
-    ✓ Download as ZIP
+    ✅ Extract right-side images from PowerPoint
+    ✅ Get all text/markup from slide
+    ✅ Overlay text on extracted images
+    ✅ Auto-name based on metadata  
+    ✅ Download as ZIP
     
     **How to use:**
     1. Upload PPTX file
-    2. Toggle "Merge Markup" in settings
-    3. Click Extract
-    4. Download ZIP
+    2. Toggle "Merge Slide Text/Markup" in settings (default: ON)
+    3. Click "Extract" button
+    4. Download ZIP file
     
-    **Markup Merge:**
-    - Combines image with all text/shapes from slide
-    - Preserves original image quality
-    - 30% opacity overlay for clarity
+    **Result:**
+    - Images with text overlay on top-left
+    - Professional markup integration
+    - All metadata preserved
     """)
 
 st.divider()
-st.caption("Made with ❤️ | PPT Extractor v3.0 - With Markup Merge")
+st.caption("Made with ❤️ | PPT Extractor v3.1 - Text Overlay Edition")
