@@ -1,46 +1,42 @@
 import io
-import os
-import subprocess
-import tempfile
 import zipfile
-from pdf2image import convert_from_path
 import streamlit as st
+from pptx import Presentation
 
-st.title("PPT Slide to Image Extractor (With Markings)")
+st.set_page_config(page_title="PPT Image Extractor", layout="centered")
+st.title("PPT Image Extractor (With Shapes & Markings)")
 
 uploaded_file = st.file_uploader("Apni PPTX File Upload Karein", type=["pptx"])
 
 if uploaded_file is not None:
-    with st.spinner("Processing PPT..."):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            ppt_path = os.path.join(temp_dir, "uploaded.pptx")
+    with st.spinner("PPT process ho rahi hai..."):
+        prs = Presentation(uploaded_file)
+        zip_buffer = io.BytesIO()
+        image_count = 0
 
-            with open(ppt_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
+        with zipfile.ZipFile(
+            zip_buffer, "a", zipfile.ZIP_DEFLATED, False
+        ) as zip_file:
+            for slide_index, slide in enumerate(prs.slides):
+                for shape_index, shape in enumerate(slide.shapes):
+                    # Check if shape contains an image
+                    if shape.shape_type == 13 or hasattr(shape, "image"):
+                        image = shape.image
+                        image_bytes = image.blob
+                        image_ext = image.ext
 
-            # 'soffice' ki jagah 'unoconv' command
-            subprocess.run(["unoconv", "-f", "pdf", ppt_path], check=True)
+                        # File Name format
+                        image_name = f"slide_{slide_index + 1}_img_{shape_index + 1}.{image_ext}"
+                        zip_file.writestr(image_name, image_bytes)
+                        image_count += 1
 
-            pdf_path = os.path.join(temp_dir, "uploaded.pdf")
-            images = convert_from_path(pdf_path, dpi=200)
-
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(
-                zip_buffer, "a", zipfile.ZIP_DEFLATED, False
-            ) as zip_file:
-                for idx, img in enumerate(images):
-                    img_byte_arr = io.BytesIO()
-                    img.save(img_byte_arr, format="PNG")
-                    zip_file.writestr(
-                        f"slide_{idx + 1}_marked.png", img_byte_arr.getvalue()
-                    )
-
-            st.success(
-                f"Kul {len(images)} slides marking ke sath convert ho gayi hain!"
-            )
+        if image_count > 0:
+            st.success(f"Kul {image_count} images successfully extract ho gayi hain!")
             st.download_button(
-                label="Download ZIP",
+                label="Saari Images ZIP Mein Download Karein",
                 data=zip_buffer.getvalue(),
-                file_name="marked_slides.zip",
+                file_name="ppt_extracted_images.zip",
                 mime="application/zip",
             )
+        else:
+            st.warning("Is PPT mein koi image nahi mili.")
