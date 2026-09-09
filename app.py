@@ -1,40 +1,97 @@
-import os
-import subprocess
-from google.colab import files
-from pdf2image import convert_from_path
+import io
+import re
+import zipfile
+from PIL import Image
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+import streamlit as st
 
-# 1. PPT File Upload karein
-print("Apni PPT file upload karein:")
-uploaded = files.upload()
-ppt_file = list(uploaded.keys())[0]
-
-# 2. PPT ko PDF mein convert karein (Automatic Merging)
-print("PPT ko PDF mein render kiya ja raha hai...")
-subprocess.run(
-    ["libreoffice", "--headless", "--convert-to", "pdf", ppt_file], check=True
+st.set_page_config(
+    page_title="PPT Auto-Crop & Renamer", layout="centered"
 )
-pdf_file = os.path.splitext(ppt_file)[0] + ".pdf"
+st.title("PPT Image Crop & Auto-Renamer")
 
-# 3. PDF Pages ka high-quality Screenshot + Auto-Crop karein
-print("Slides ke screenshots aur crop process ho rahe hain...")
-images = convert_from_path(pdf_file, dpi=200)
 
-os.makedirs("cropped_slides", exist_ok=True)
+def extract_metadata(slide):
+    text_data = ""
+    for shape in slide.shapes:
+        if shape.has_text_frame:
+            text_data += " " + shape.text_frame.text
 
-for i, image in enumerate(images):
-    # Auto-Crop: Safed margins/borders ko automatic crop kar deta hai
-    bbox = image.getbbox()  # Get content bounding box
-    if bbox:
-        cropped_image = image.crop(bbox)
-    else:
-        cropped_image = image
+    # Default values
+    outlet_name = "OUTLET"
+    contact = "0000000000"
+    media_type = "NL"
+    size = "0x0"
 
-    # Save final marked image
-    output_path = f"cropped_slides/slide_{i+1}_marked.png"
-    cropped_image.save(output_path, "PNG")
-    print(f"Saved: {output_path}")
+    # Regex Extraction
+    outlet_match = re.search(
+        r"Outlet Name:\s*([^\n\r]+)", text_data, re.IGNORECASE
+    )
+    if outlet_match:
+        outlet_name = (
+            outlet_match.group(1).strip().replace(" ", "_").upper()
+        )
 
-# 4. ZIP banakar download karein
-subprocess.run(["zip", "-r", "marked_slides.zip", "cropped_slides"])
-files.download("marked_slides.zip")
-print("Download complete!")
+    contact_match = re.search(
+        r"Contact No:\s*(\d{10})", text_data, re.IGNORECASE
+    )
+    if contact_match:
+        contact = contact_match.group(1).strip()
+
+    type_match = re.search(
+        r"Type:\s*([A-Za-z0-9]+)", text_data, re.IGNORECASE
+    )
+    if type_match:
+        media_type = type_match.group(1).strip().upper()
+
+    size_match = re.search(
+        r"Size:\s*(\d+)\s*x\s*(\d+)", text_data, re.IGNORECASE
+    )
+    if size_match:
+        size = f"{size_match.group(1)}x{size_match.group(2)}"
+
+    return f"{outlet_name}_{contact}_{media_type}_{size}"
+
+
+uploaded_file = st.file_uploader(
+    "Apni PPTX File Upload Karein", type=["pptx"]
+)
+
+if uploaded_file is not None:
+    if st.button("Extract & Auto-Name Images"):
+        with st.spinner("Processing slides..."):
+            prs = Presentation(uploaded_file)
+            zip_buffer = io.BytesIO()
+            extracted_count = 0
+
+            with zipfile.ZipFile(
+                zip_buffer, "a", zipfile.ZIP_DEFLATED, False
+            ) as zip_file:
+                for idx, slide in enumerate(prs.slides):
+                    filename_prefix = extract_metadata(slide)
+                    img_idx = 1
+
+                    for shape in slide.shapes:
+                        if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                            image_bytes = shape.image.blob
+                            image_ext = shape.image.ext
+
+                            # Correct format naming
+                            final_name = f"{filename_prefix}_{img_idx}.{image_ext}"
+                            zip_file.writestr(final_name, image_bytes)
+                            img_idx += 1
+                            extracted_count += 1
+
+            if extracted_count > 0:
+                st.success(
+                    f"Total {extracted_count} images successfully renamed & extracted!"
+                )
+                st.download_button(
+                    label="Download Renamed ZIP",
+                    data=zip_buffer.getvalue(),
+                    file_name="renamed_outlet_images.zip",
+                    mime="application/zip",
+                )
+            else:
+                st.warning("PPT mein koi images nahi mili.")
