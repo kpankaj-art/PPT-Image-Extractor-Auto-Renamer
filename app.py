@@ -1,44 +1,46 @@
 import io
+import os
+import subprocess
 import tempfile
 import zipfile
-import aspose.slides as slides
+from pdf2image import convert_from_path
 import streamlit as st
 
-st.set_page_config(page_title="PPT Slide to Image Extractor", layout="centered")
-st.title("PPT Slide to Image (With Markings & Shapes)")
+st.set_page_config(page_title="PPT Slide Extractor", layout="centered")
+st.title("PPT Slide to Image (With Markings)")
 
 uploaded_file = st.file_uploader("Apni PPTX File Upload Karein", type=["pptx", "ppt"])
 
 if uploaded_file is not None:
-    if st.button("Extract Images (With Markings)"):
-        with st.spinner("Processing PPT and Rendering Slides..."):
+    if st.button("Convert & Download Images"):
+        with st.spinner("Processing slides with markings..."):
             with tempfile.TemporaryDirectory() as temp_dir:
-                # Save uploaded file temporarily
-                temp_ppt_path = f"{temp_dir}/input.pptx"
-                with open(temp_ppt_path, "wb") as f:
+                ppt_path = os.path.join(temp_dir, "input.pptx")
+                
+                with open(ppt_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
 
-                # Load PPTX using Aspose.Slides
-                presentation = slides.Presentation(temp_ppt_path)
+                # Convert PPTX to PDF using LibreOffice
+                subprocess.run(
+                    ["libreoffice", "--headless", "--convert-to", "pdf", ppt_path, "--outdir", temp_dir],
+                    check=True
+                )
+
+                pdf_path = os.path.join(temp_dir, "input.pdf")
+                
+                # Convert PDF pages to high-quality images
+                images = convert_from_path(pdf_path, dpi=200)
+
                 zip_buffer = io.BytesIO()
-
-                # High quality scale factor (2x resolution)
-                scale_x = 2.0
-                scale_y = 2.0
-
                 with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-                    for i, slide in enumerate(presentation.slides):
-                        # Render slide with markings into image
-                        image_stream = io.BytesIO()
-                        with slide.get_image(scale_x, scale_y) as slide_image:
-                            slide_image.save(image_stream, slides.ImageFormat.JPEG)
+                    for idx, img in enumerate(images):
+                        img_byte_arr = io.BytesIO()
+                        img.save(img_byte_arr, format="PNG")
+                        zip_file.writestr(f"slide_{idx + 1}_marked.png", img_byte_arr.getvalue())
 
-                        # Save into zip
-                        zip_file.writestr(f"slide_{i + 1}_marked.jpg", image_stream.getvalue())
-
-                st.success(f"Kul {len(presentation.slides)} slides marking ke sath convert ho gayi hain!")
+                st.success(f"Total {len(images)} slides successfully converted!")
                 st.download_button(
-                    label="Download All Merged Images (ZIP)",
+                    label="Download Merged Images (ZIP)",
                     data=zip_buffer.getvalue(),
                     file_name="slides_with_markings.zip",
                     mime="application/zip",
