@@ -175,6 +175,140 @@ def overlay_markup_on_image(base_img, markup_img, base_box, markup_box):
     return Image.alpha_composite(base_img, canvas)
 
 
+
+def extract_slide_text(root):
+    """Extract visible text from a slide XML in reading order."""
+    texts = []
+    for t in root.findall(".//a:t", NS):
+        if t.text:
+            texts.append(t.text.strip())
+    return texts
+
+
+def clean_filename_part(value):
+    """Make a safe filename part while preserving useful outlet/type/size text."""
+    value = str(value or "").strip()
+
+    # Normalize common multiplication/spacing forms: 10 X 2 -> 10x2
+    value = re.sub(r"\s*[xX×]\s*", "x", value)
+    value = re.sub(r"\s+", "_", value)
+
+    # Keep letters, numbers, underscore, dot and hyphen only.
+    value = re.sub(r"[^A-Za-z0-9_.-]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("._-")
+
+    return value or "UNKNOWN"
+
+
+def find_after_label(texts, labels):
+    """Find the first non-empty text following one of the supplied labels."""
+    upper = [t.upper().strip() for t in texts]
+
+    for i, item in enumerate(upper):
+        for label in labels:
+            if item == label or item.startswith(label + ":") or item.startswith(label + ":-"):
+                # Value may be after ':' in the same text box.
+                raw = texts[i]
+                if ":" in raw:
+                    value = raw.split(":", 1)[1].strip(" -")
+                    if value:
+                        return value
+
+                # Otherwise use the next useful text item.
+                for j in range(i + 1, min(i + 5, len(texts))):
+                    if texts[j].strip():
+                        candidate = texts[j].strip()
+                        if candidate.upper() not in {
+                            "ADDRESS", "CITY", "CONTACT NO",
+                            "INSTALLATION DATE", "BEFORE VIEW",
+                            "AFTER VIEW", "FAR VIEW", "CLOSE VIEW",
+                            "QTY", "SIZE", "TYPE",
+                        }:
+                            return candidate
+    return ""
+
+
+def extract_slide_metadata(root):
+    """
+    Extract Outlet Name, Mobile, Type and Size from the slide text.
+
+    Supports both:
+      Outlet Name:- ABC
+      Address:- ...
+      Contact No:- 9999999999
+      TYPE:-NL
+      SIZE:-10X3
+
+    and layouts where the label and value are separate text boxes.
+    """
+    texts = extract_slide_text(root)
+
+    outlet = find_after_label(
+        texts,
+        ["OUTLET NAME", "OUTLET NAME:-", "OUTLET NAME:"],
+    )
+    mobile = find_after_label(
+        texts,
+        ["CONTACT NO", "CONTACT NO:-", "CONTACT NO:"],
+    )
+    typ = find_after_label(
+        texts,
+        ["TYPE", "TYPE:-", "TYPE:"],
+    )
+    size = find_after_label(
+        texts,
+        ["SIZE", "SIZE:-", "SIZE:"],
+    )
+
+    # Fallback regex over the complete visible text.
+    full = " | ".join(texts)
+
+    if not outlet:
+        m = re.search(r"OUTLET\s*NAME\s*[:\-]*\s*([^|]+)", full, re.I)
+        if m:
+            outlet = m.group(1).strip()
+
+    if not mobile:
+        m = re.search(r"CONTACT\s*NO\s*[:\-]*\s*([0-9+\-\s]{7,})", full, re.I)
+        if m:
+            mobile = m.group(1).strip()
+
+    if not typ:
+        m = re.search(r"\bTYPE\s*[:\-]*\s*([A-Za-z]+)", full, re.I)
+        if m:
+            typ = m.group(1).strip()
+
+    if not size:
+        m = re.search(r"\bSIZE\s*[:\-]*\s*([0-9.]+\s*[xX×]\s*[0-9.]+)", full, re.I)
+        if m:
+            size = m.group(1).strip()
+
+    # Some slides have a separate "SIZE:-" value that may be numeric text.
+    if size:
+        size = re.sub(r"\s*[xX×]\s*", "x", size)
+
+    return {
+        "outlet": clean_filename_part(outlet),
+        "mobile": clean_filename_part(mobile),
+        "type": clean_filename_part(typ).upper(),
+        "size": clean_filename_part(size),
+    }
+
+
+def make_output_filename(metadata, image_number):
+    """
+    Required naming system:
+        OUTLETNAME_MOBILE_TYPE_SIZE_01.png
+    """
+    return (
+        f"{metadata['outlet']}_"
+        f"{metadata['mobile']}_"
+        f"{metadata['type']}_"
+        f"{metadata['size']}_"
+        f"{image_number:02d}.png"
+    )
+
+
 def process_pptx(uploaded_file, progress_callback=None):
     """
     Extract every photo from every slide and merge any PowerPoint Ink
@@ -202,6 +336,7 @@ def process_pptx(uploaded_file, progress_callback=None):
 
         for slide_index, slide_path in enumerate(slide_names, start=1):
             root = ET.fromstring(zf.read(slide_path))
+            slide_metadata = extract_slide_metadata(root)
 
             rel_path = (
                 "ppt/slides/_rels/"
@@ -313,12 +448,16 @@ def process_pptx(uploaded_file, progress_callback=None):
                 results.append({
                     "slide": slide_index,
                     "image": output_image_no,
-                    "filename": (
-                        f"Slide_{slide_index:03d}_"
-                        f"Image_{output_image_no:02d}.png"
+                    "filename": make_output_filename(
+                        slide_metadata,
+                        output_image_no,
                     ),
                     "data": buffer.getvalue(),
                     "markup_count": len(assigned_inks),
+                    "outlet": slide_metadata["outlet"],
+                    "mobile": slide_metadata["mobile"],
+                    "type": slide_metadata["type"],
+                    "size": slide_metadata["size"],
                 })
 
             if progress_callback:
