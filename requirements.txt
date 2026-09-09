@@ -1,2 +1,2 @@
 streamlit
-aspose.slides
+pdf2image
