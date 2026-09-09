@@ -6,15 +6,14 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 import streamlit as st
 
-st.set_page_config(page_title="PPT Far-View Crop & Renamer", layout="centered")
-st.title("PPT Far-View (Right Image) Crop & Renamer")
+st.set_page_config(page_title="PPT Far-View Extractor", layout="centered")
+st.title("PPT Right-Side Image (Far View) Extractor & Renamer")
 
 
 def extract_metadata_from_slide(slide):
-    """PPT Slide ke saare text boxes se accurate metadata extract karta hai."""
+    """Slide ke sabhi text elements se metadata robustly read karta hai."""
     text_data = []
 
-    # Slide ke har text box aur table me se text read karna
     for shape in slide.shapes:
         if shape.has_text_frame:
             text_data.append(shape.text_frame.text)
@@ -38,7 +37,7 @@ def extract_metadata_from_slide(slide):
         cleaned = re.sub(r"[^\w\s-]", "", raw_name)
         outlet_name = re.sub(r"\s+", "_", cleaned).upper().strip("_")
 
-    # 2. Contact Number Match (10 digit exact)
+    # 2. Contact Match (Exact 10-digit Mobile Number)
     contact_match = re.search(
         r"(?:Contact|Mobile|Phone)?\s*:?\s*([6-9]\d{9})",
         clean_text,
@@ -69,13 +68,12 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    if st.button("Extract Right Image & Rename"):
+    if st.button("Extract Right Image & Auto-Rename"):
         with st.spinner("Processing PPT slides..."):
             prs = Presentation(uploaded_file)
             zip_buffer = io.BytesIO()
             extracted_count = 0
 
-            # Slide ki total width se center X coordinate nikalna
             slide_width = prs.slide_width
 
             with zipfile.ZipFile(
@@ -86,9 +84,8 @@ if uploaded_file is not None:
                     img_idx = 1
 
                     for shape in slide.shapes:
-                        # Sirf image shapes filter karna
                         if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                            # 📍 RIGHT SIDE FILTER: Check if image position is beyond center
+                            # 📍 LOGIC: Sirf right-side wali image filtering (Far View)
                             if shape.left > (slide_width / 2):
                                 image_bytes = shape.image.blob
                                 image_ext = shape.image.ext
@@ -103,13 +100,13 @@ if uploaded_file is not None:
 
             if extracted_count > 0:
                 st.success(
-                    f"Total {extracted_count} Right-side Images (Far View) extracted & renamed successfully!"
+                    f"Total {extracted_count} Right Images (Far View) successfully extracted & renamed!"
                 )
                 st.download_button(
-                    label="Download Cropped ZIP",
+                    label="Download Renamed ZIP",
                     data=zip_buffer.getvalue(),
-                    file_name="ppt_far_views.zip",
+                    file_name="outlet_far_views.zip",
                     mime="application/zip",
                 )
             else:
-                st.warning("PPT me Right-side wali koi image nahi mili.")
+                st.warning("PPT me koi Right-side Image (Far View) nahi mili.")
