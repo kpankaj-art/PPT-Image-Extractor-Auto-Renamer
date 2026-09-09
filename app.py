@@ -1,69 +1,40 @@
-import io
 import os
 import subprocess
-import tempfile
-import zipfile
-import fitz  # PyMuPDF (Ultra Lightweight)
-import streamlit as st
+from google.colab import files
+from pdf2image import convert_from_path
 
-st.set_page_config(page_title="Lite PPT Extractor", layout="centered")
-st.title("PPT Slide & Markings Extractor (1GB RAM Optimized)")
+# 1. PPT File Upload karein
+print("Apni PPT file upload karein:")
+uploaded = files.upload()
+ppt_file = list(uploaded.keys())[0]
 
-uploaded_file = st.file_uploader(
-    "Apni PPTX File Upload Karein", type=["pptx", "ppt"]
+# 2. PPT ko PDF mein convert karein (Automatic Merging)
+print("PPT ko PDF mein render kiya ja raha hai...")
+subprocess.run(
+    ["libreoffice", "--headless", "--convert-to", "pdf", ppt_file], check=True
 )
+pdf_file = os.path.splitext(ppt_file)[0] + ".pdf"
 
-if uploaded_file is not None:
-    if st.button("Convert to Images (With Markings)"):
-        with st.spinner("Processing slides with markings..."):
-            try:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    ppt_path = os.path.join(temp_dir, "input.pptx")
-                    pdf_path = os.path.join(temp_dir, "input.pdf")
+# 3. PDF Pages ka high-quality Screenshot + Auto-Crop karein
+print("Slides ke screenshots aur crop process ho rahe hain...")
+images = convert_from_path(pdf_file, dpi=200)
 
-                    # PPTX file temporarily save karein
-                    with open(ppt_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
+os.makedirs("cropped_slides", exist_ok=True)
 
-                    # Headless/No-GUI mode se PDF banayein (Low RAM)
-                    subprocess.run(
-                        [
-                            "soffice",
-                            "--headless",
-                            "--convert-to",
-                            "pdf",
-                            ppt_path,
-                            "--outdir",
-                            temp_dir,
-                        ],
-                        check=True,
-                    )
+for i, image in enumerate(images):
+    # Auto-Crop: Safed margins/borders ko automatic crop kar deta hai
+    bbox = image.getbbox()  # Get content bounding box
+    if bbox:
+        cropped_image = image.crop(bbox)
+    else:
+        cropped_image = image
 
-                    # PyMuPDF se PDF pages ko image mein convert karein
-                    doc = fitz.open(pdf_path)
-                    zip_buffer = io.BytesIO()
+    # Save final marked image
+    output_path = f"cropped_slides/slide_{i+1}_marked.png"
+    cropped_image.save(output_path, "PNG")
+    print(f"Saved: {output_path}")
 
-                    with zipfile.ZipFile(
-                        zip_buffer, "a", zipfile.ZIP_DEFLATED, False
-                    ) as zip_file:
-                        for idx, page in enumerate(doc):
-                            # Resolution set karein (1.5x scale low RAM ke liye perfect hai)
-                            pix = page.get_pixmap(dpi=150)
-                            img_data = pix.tobytes("png")
-
-                            zip_file.writestr(
-                                f"slide_{idx + 1}_marked.png", img_data
-                            )
-
-                    st.success(
-                        f"Total {len(doc)} slides successfully extracted with markings!"
-                    )
-                    st.download_button(
-                        label="Download Merged Images (ZIP)",
-                        data=zip_buffer.getvalue(),
-                        file_name="marked_slides.zip",
-                        mime="application/zip",
-                    )
-
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
+# 4. ZIP banakar download karein
+subprocess.run(["zip", "-r", "marked_slides.zip", "cropped_slides"])
+files.download("marked_slides.zip")
+print("Download complete!")
