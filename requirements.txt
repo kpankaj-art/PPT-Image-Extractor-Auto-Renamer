@@ -1,2 +1,4 @@
 streamlit
+python-pptx
 pdf2image
+pypdf
