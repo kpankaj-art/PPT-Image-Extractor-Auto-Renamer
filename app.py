@@ -618,8 +618,8 @@ def make_zip(results):
 
 st.title("🖼️ PPT Image + Markup Extractor")
 st.write(
-    "PowerPoint upload करें और photos को उनके ऊपर मौजूद "
-    "markup के साथ अलग-अलग PNG images में निकालें."
+    "Upload the PowerPoint and the photos placed on it. "
+    "Extract as separate PNG images with markup."
 )
 
 st.info(
