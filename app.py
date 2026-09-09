@@ -413,7 +413,7 @@ def make_output_filename(metadata, image_number):
     )
 
 
-def process_pptx(uploaded_file, progress_callback=None):
+def process_pptx(uploaded_file, image_selection="Both", progress_callback=None):
     """
     Extract every photo from every slide and merge any PowerPoint Ink
     fallback image whose center lies over that photo.
@@ -492,9 +492,21 @@ def process_pptx(uploaded_file, progress_callback=None):
                     owner = min(candidates, key=lambda p: bbox_area(p["bbox"]))
                     assigned[id(owner)].append(ink)
 
+            # Sort photos from left to right so the first photo is the left image
+            # and the second photo is the right image.
+            normal_pics.sort(key=lambda p: (p["bbox"][0], p["bbox"][1]))
+
+            # Select which photo(s) to export.
+            if image_selection == "Left image":
+                selected_pics = normal_pics[:1]
+            elif image_selection == "Right image":
+                selected_pics = normal_pics[-1:]
+            else:
+                selected_pics = normal_pics
+
             output_image_no = 0
 
-            for base in normal_pics:
+            for base in selected_pics:
                 rid_info = rels.get(base["rid"])
                 if not rid_info:
                     continue
@@ -623,6 +635,13 @@ uploaded_file = st.file_uploader(
 if uploaded_file:
     st.success(f"Selected: {uploaded_file.name}")
 
+    image_selection = st.radio(
+        "Which image do you want to extract?",
+        options=["Left image", "Right image", "Both"],
+        index=2,
+        horizontal=True,
+    )
+
     if st.button("🚀 Process PPT", type="primary", use_container_width=True):
         progress = st.progress(0)
         status = st.empty()
@@ -637,6 +656,7 @@ if uploaded_file:
             with st.spinner("PPT process हो रही है..."):
                 results, stats = process_pptx(
                     uploaded_file,
+                    image_selection=image_selection,
                     progress_callback=update_progress,
                 )
 
