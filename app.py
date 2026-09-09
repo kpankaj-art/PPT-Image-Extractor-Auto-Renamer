@@ -665,8 +665,8 @@ if uploaded_file:
 
             if not results:
                 st.error(
-                    "कोई image नहीं मिली. कृपया सुनिश्चित करें कि PPTX "
-                    "file valid है."
+                    "No image found. Please make sure that the PPTX "
+                    "The file is valid."
                 )
             else:
                 col1, col2, col3 = st.columns(3)
@@ -675,7 +675,7 @@ if uploaded_file:
                 col3.metric("Markup merged", stats["merged"])
 
                 st.success(
-                    f"{len(results)} images तैयार हैं."
+                    f"{len(results)} Images are ready."
                 )
 
                 zip_bytes = make_zip(results)
@@ -705,12 +705,12 @@ if uploaded_file:
 
                 if len(results) > 6:
                     st.caption(
-                        f"Preview में पहले 6 images दिखाई गई हैं. "
-                        f"ZIP में सभी {len(results)} images हैं."
+                        f"First 6 images are shown in the preview. "
+                        f"All the images are {len(results)} in the ZIP file."
                     )
 
         except zipfile.BadZipFile:
-            st.error("यह valid PPTX file नहीं लग रही है.")
+            st.error("This doesn't look like a valid PPTX file.")
         except Exception as e:
             st.error(f"Processing error: {e}")
             st.exception(e)
