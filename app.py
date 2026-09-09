@@ -176,20 +176,54 @@ def overlay_markup_on_image(base_img, markup_img, base_box, markup_box):
 
 
 
+def extract_text_shapes(root):
+    """Return visible text boxes with their PowerPoint position/size."""
+    items = []
+    for sp in root.findall(".//p:sp", NS):
+        texts = [t.text.strip() for t in sp.findall(".//a:t", NS) if t.text and t.text.strip()]
+        if not texts:
+            continue
+
+        xfrm = sp.find(".//a:xfrm", NS)
+        off = xfrm.find("a:off", NS) if xfrm is not None else None
+        ext = xfrm.find("a:ext", NS) if xfrm is not None else None
+        if off is None or ext is None:
+            continue
+
+        try:
+            x = int(off.attrib["x"])
+            y = int(off.attrib["y"])
+            w = int(ext.attrib["cx"])
+            h = int(ext.attrib["cy"])
+        except (KeyError, ValueError):
+            continue
+
+        items.append({
+            "text": " ".join(texts),
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+            "cx": x + w / 2,
+            "cy": y + h / 2,
+        })
+    return items
+
+
 def extract_slide_text(root):
     """Extract visible text from a slide XML in reading order."""
-    texts = []
-    for t in root.findall(".//a:t", NS):
-        if t.text:
-            texts.append(t.text.strip())
-    return texts
+    return [
+        t.text.strip()
+        for t in root.findall(".//a:t", NS)
+        if t.text and t.text.strip()
+    ]
 
 
 def clean_filename_part(value):
     """Make a safe filename part while preserving useful outlet/type/size text."""
     value = str(value or "").strip()
 
-    # Normalize common multiplication/spacing forms: 10 X 2 -> 10x2
+    # Normalize multiplication/spacing forms: 10 X 2 -> 10x2.
     value = re.sub(r"\s*[xX×]\s*", "x", value)
     value = re.sub(r"\s+", "_", value)
 
@@ -200,92 +234,165 @@ def clean_filename_part(value):
     return value or "UNKNOWN"
 
 
-def find_after_label(texts, labels):
-    """Find the first non-empty text following one of the supplied labels."""
-    upper = [t.upper().strip() for t in texts]
+def _combined_label_value(text, label, next_labels=()):
+    """Extract a value from text such as 'TYPE:-NL SIZE:-10X2'."""
+    pattern = re.escape(label) + r"\s*[:\-]*\s*(.*?)"
+    if next_labels:
+        stop = "|".join(re.escape(x) for x in next_labels)
+        pattern += rf"(?=\s+(?:{stop})\s*[:\-]|$)"
+    else:
+        pattern += r"$"
 
-    for i, item in enumerate(upper):
-        for label in labels:
-            if item == label or item.startswith(label + ":") or item.startswith(label + ":-"):
-                # Value may be after ':' in the same text box.
-                raw = texts[i]
-                if ":" in raw:
-                    value = raw.split(":", 1)[1].strip(" -")
-                    if value:
-                        return value
-
-                # Otherwise use the next useful text item.
-                for j in range(i + 1, min(i + 5, len(texts))):
-                    if texts[j].strip():
-                        candidate = texts[j].strip()
-                        if candidate.upper() not in {
-                            "ADDRESS", "CITY", "CONTACT NO",
-                            "INSTALLATION DATE", "BEFORE VIEW",
-                            "AFTER VIEW", "FAR VIEW", "CLOSE VIEW",
-                            "QTY", "SIZE", "TYPE",
-                        }:
-                            return candidate
-    return ""
+    m = re.search(pattern, text, re.I)
+    return m.group(1).strip(" -:") if m else ""
 
 
 def extract_slide_metadata(root):
     """
-    Extract Outlet Name, Mobile, Type and Size from the slide text.
+    Extract ONLY the four fields required for output filenames:
 
-    Supports both:
-      Outlet Name:- ABC
-      Address:- ...
-      Contact No:- 9999999999
-      TYPE:-NL
-      SIZE:-10X3
+        OUTLETNAME_MOBILE_TYPE_SIZE_01.png
 
-    and layouts where the label and value are separate text boxes.
+    Address, city, quantity, dates, URLs and other slide text are deliberately
+    ignored.
+
+    The PPT in use has two common layouts:
+      1. Labels and values are separate text boxes.
+      2. Labels and values are combined in the same text box.
     """
-    texts = extract_slide_text(root)
-
-    outlet = find_after_label(
-        texts,
-        ["OUTLET NAME", "OUTLET NAME:-", "OUTLET NAME:"],
-    )
-    mobile = find_after_label(
-        texts,
-        ["CONTACT NO", "CONTACT NO:-", "CONTACT NO:"],
-    )
-    typ = find_after_label(
-        texts,
-        ["TYPE", "TYPE:-", "TYPE:"],
-    )
-    size = find_after_label(
-        texts,
-        ["SIZE", "SIZE:-", "SIZE:"],
-    )
-
-    # Fallback regex over the complete visible text.
+    shapes = extract_text_shapes(root)
+    texts = [s["text"] for s in shapes]
     full = " | ".join(texts)
 
-    if not outlet:
-        m = re.search(r"OUTLET\s*NAME\s*[:\-]*\s*([^|]+)", full, re.I)
-        if m:
-            outlet = m.group(1).strip()
+    # ---------- MOBILE ----------
+    # Prefer a 10-digit number near the Contact No area. This prevents a
+    # PIN/serial number from being used as the mobile number.
+    mobile = ""
+    contact_shapes = [
+        s for s in shapes if re.search(r"CONTACT\s*NO", s["text"], re.I)
+    ]
+    if contact_shapes:
+        ref = contact_shapes[0]
+        candidates = []
+        for s in shapes:
+            digits = re.sub(r"\D", "", s["text"])
+            if len(digits) >= 10:
+                candidates.append((abs(s["cx"] - ref["cx"]) + abs(s["cy"] - ref["cy"]), digits[-10:]))
+        if candidates:
+            mobile = min(candidates, key=lambda x: x[0])[1]
 
     if not mobile:
-        m = re.search(r"CONTACT\s*NO\s*[:\-]*\s*([0-9+\-\s]{7,})", full, re.I)
+        m = re.search(r"CONTACT\s*NO\s*[:\-]*\s*(\+?\d[\d\s\-]{8,})", full, re.I)
         if m:
-            mobile = m.group(1).strip()
+            digits = re.sub(r"\D", "", m.group(1))
+            if len(digits) >= 10:
+                mobile = digits[-10:]
 
-    if not typ:
-        m = re.search(r"\bTYPE\s*[:\-]*\s*([A-Za-z]+)", full, re.I)
+    # ---------- TYPE ----------
+    typ = ""
+
+    # Combined format, e.g. TYPE:-NL.
+    for s in shapes:
+        m = re.search(r"\bTYPE\s*[:\-]+\s*([A-Za-z0-9_-]+)", s["text"], re.I)
         if m:
             typ = m.group(1).strip()
+            break
 
-    if not size:
-        m = re.search(r"\bSIZE\s*[:\-]*\s*([0-9.]+\s*[xX×]\s*[0-9.]+)", full, re.I)
+    # Separate label/value format. The media type is in the bottom row and
+    # sits close to the Type label horizontally.
+    if not typ:
+        type_labels = [s for s in shapes if re.fullmatch(r"TYPE\s*:?", s["text"], re.I)]
+        if type_labels:
+            ref = type_labels[0]
+            candidates = []
+            for s in shapes:
+                value = s["text"].strip()
+                if not re.fullmatch(r"[A-Za-z]{1,10}", value):
+                    continue
+                if re.fullmatch(r"(?:QTY|SIZE|TYPE|ADDRESS|CITY|CONTACT|NO|VIEW)", value, re.I):
+                    continue
+                # Same bottom band as Type label and close in X.
+                if s["cy"] >= ref["cy"] - 1_000_000:
+                    candidates.append((abs(s["cx"] - ref["cx"]) + abs(s["cy"] - ref["cy"]) * 2, value))
+            if candidates:
+                typ = min(candidates, key=lambda x: x[0])[1]
+
+    # ---------- SIZE ----------
+    size = ""
+
+    # Combined format, e.g. SIZE:-9X1.5.
+    for s in shapes:
+        m = re.search(r"\bSIZE\s*[:\-]*\s*(\d+(?:\.\d+)?\s*[xX×]\s*\d+(?:\.\d+)?)", s["text"], re.I)
         if m:
-            size = m.group(1).strip()
+            size = m.group(1)
+            break
 
-    # Some slides have a separate "SIZE:-" value that may be numeric text.
-    if size:
-        size = re.sub(r"\s*[xX×]\s*", "x", size)
+    # Separate format: the dimension is represented by three text boxes,
+    # e.g. '10' + 'x' + '2'. Use the Size label's horizontal area only.
+    if not size:
+        size_labels = [s for s in shapes if re.fullmatch(r"SIZE\s*:?", s["text"], re.I)]
+        if size_labels:
+            ref = size_labels[0]
+            # Search numeric/x tokens in the same bottom band and around the
+            # Size label. Sort left-to-right, then build the dimension string.
+            tokens = []
+            for s in shapes:
+                value = s["text"].strip()
+                if not re.fullmatch(r"(?:\d+(?:\.\d+)?|[xX×])", value):
+                    continue
+                if abs(s["cy"] - ref["cy"]) > 1_000_000:
+                    continue
+                if s["cx"] < ref["x"] - 500_000 or s["cx"] > ref["x"] + ref["w"] + 500_000:
+                    continue
+                tokens.append(s)
+
+            tokens.sort(key=lambda s: s["x"])
+            raw = "".join(s["text"] for s in tokens)
+            m = re.search(r"(\d+(?:\.\d+)?)[xX×](\d+(?:\.\d+)?)", raw)
+            if m:
+                size = f"{m.group(1)}x{m.group(2)}"
+
+    # ---------- OUTLET NAME ----------
+    outlet = ""
+
+    # Combined format: explicitly stop at Address so the address can NEVER
+    # become part of the outlet name.
+    for s in shapes:
+        if re.search(r"OUTLET\s*NAME", s["text"], re.I):
+            m = re.search(
+                r"OUTLET\s*NAME\s*[:\-]\s*(.*?)\s+(?=ADDRESS\s*[:\-]|CITY\s*[:\-]|CONTACT\s*NO\s*[:\-]|INSTALLATION\s*DATE)",
+                s["text"],
+                re.I,
+            )
+            if m and m.group(1).strip():
+                outlet = m.group(1).strip()
+                break
+
+    # Separate format: choose the text box nearest to the Outlet Name label,
+    # but only from the top header area and only alphabetic text. This avoids
+    # selecting Address, City or the contact number.
+    if not outlet:
+        label_shapes = [
+            s for s in shapes if re.search(r"OUTLET\s*NAME", s["text"], re.I)
+        ]
+        if label_shapes:
+            ref = label_shapes[0]
+            candidates = []
+            for s in shapes:
+                value = s["text"].strip()
+                if not value or re.search(r"(?:ADDRESS|CITY|CONTACT|INSTALLATION|OUTLET\s*NAME)", value, re.I):
+                    continue
+                if re.search(r"\d", value):
+                    continue
+                if s["y"] > 800_000:  # keep only the outlet-name line; ignore city/footer
+                    continue
+                # Outlet name is on the left side of the header in this layout.
+                if s["x"] > 9_000_000:
+                    continue
+                score = abs(s["cx"] - ref["cx"]) + abs(s["cy"] - ref["cy"])
+                candidates.append((score, value))
+            if candidates:
+                outlet = min(candidates, key=lambda x: x[0])[1]
 
     return {
         "outlet": clean_filename_part(outlet),
@@ -296,10 +403,7 @@ def extract_slide_metadata(root):
 
 
 def make_output_filename(metadata, image_number):
-    """
-    Required naming system:
-        OUTLETNAME_MOBILE_TYPE_SIZE_01.png
-    """
+    """Required naming: OUTLETNAME_MOBILE_TYPE_SIZE_01.png"""
     return (
         f"{metadata['outlet']}_"
         f"{metadata['mobile']}_"
@@ -325,6 +429,7 @@ def process_pptx(uploaded_file, progress_callback=None):
     markup_count = 0
     image_count = 0
     merged_count = 0
+    used_filenames = set()
 
     with zipfile.ZipFile(io.BytesIO(ppt_bytes), "r") as zf:
         slide_names = [
@@ -445,13 +550,25 @@ def process_pptx(uploaded_file, progress_callback=None):
                     optimize=True,
                 )
 
+                # Keep the requested naming format while avoiding duplicate
+                # ZIP filenames when two slides contain identical metadata.
+                final_image_no = output_image_no
+                filename = make_output_filename(
+                    slide_metadata,
+                    final_image_no,
+                )
+                while filename in used_filenames:
+                    final_image_no += 1
+                    filename = make_output_filename(
+                        slide_metadata,
+                        final_image_no,
+                    )
+                used_filenames.add(filename)
+
                 results.append({
                     "slide": slide_index,
-                    "image": output_image_no,
-                    "filename": make_output_filename(
-                        slide_metadata,
-                        output_image_no,
-                    ),
+                    "image": final_image_no,
+                    "filename": filename,
                     "data": buffer.getvalue(),
                     "markup_count": len(assigned_inks),
                     "outlet": slide_metadata["outlet"],
