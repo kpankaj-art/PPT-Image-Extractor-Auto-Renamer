@@ -2,14 +2,14 @@ import io
 import re
 import zipfile
 import fitz  # PyMuPDF
-from PIL import Image
 import streamlit as st
 
-st.set_page_config(page_title="PDF Auto-Crop & Renamer", layout="centered")
-st.title("PDF Image Crop & Auto-Renamer")
+st.set_page_config(page_title="PDF Far-View Crop & Renamer", layout="centered")
+st.title("PDF Far-View (Right Image) Crop & Renamer")
 
 
 def extract_metadata_from_text(text_data):
+    """PDF text se Metadata Extract karne ke liye."""
     outlet_name = "OUTLET"
     contact = "0000000000"
     media_type = "NL"
@@ -49,7 +49,7 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    if st.button("Extract, Crop & Auto-Name Images"):
+    if st.button("Extract Right Image & Rename"):
         with st.spinner("Processing PDF pages..."):
             pdf_bytes = uploaded_file.read()
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -63,8 +63,11 @@ if uploaded_file is not None:
                     page_text = page.get_text()
                     filename_prefix = extract_metadata_from_text(page_text)
 
-                    # Quality high karne ke liye zoom factor (3 = 300 DPI approx)
-                    zoom = 3
+                    # Page Width nikal kar center X boundary decide karte hain
+                    page_rect = page.rect
+                    mid_x = page_rect.width / 2
+
+                    zoom = 3  # High-quality DPI output
                     mat = fitz.Matrix(zoom, zoom)
 
                     image_list = page.get_images(full=True)
@@ -75,29 +78,30 @@ if uploaded_file is not None:
                         rects = page.get_image_rects(xref)
 
                         for rect in rects:
-                            # 📍 YEHA PAR AAYEGA 'clip=rect'
-                            pix = page.get_pixmap(matrix=mat, clip=rect)
+                            # 📍 LOGIC: Sirf wahi image crop hogi jo Center point ke RIGHT side me hai
+                            if rect.x0 >= mid_x * 0.8:
+                                pix = page.get_pixmap(matrix=mat, clip=rect)
+                                img_data = pix.tobytes("png")
 
-                            img_data = pix.tobytes("png")
-                            final_name = (
-                                f"{filename_prefix}_{img_idx}.png"
-                            )
+                                final_name = (
+                                    f"{filename_prefix}_{img_idx}.png"
+                                )
+                                zip_file.writestr(final_name, img_data)
 
-                            zip_file.writestr(final_name, img_data)
-                            img_idx += 1
-                            extracted_count += 1
+                                img_idx += 1
+                                extracted_count += 1
 
             doc.close()
 
             if extracted_count > 0:
                 st.success(
-                    f"Total {extracted_count} images successfully cropped & saved!"
+                    f"Total {extracted_count} Right Images (Far View) successfully cropped & saved!"
                 )
                 st.download_button(
                     label="Download Cropped ZIP",
                     data=zip_buffer.getvalue(),
-                    file_name="cropped_outlet_images.zip",
+                    file_name="far_view_outlet_images.zip",
                     mime="application/zip",
                 )
             else:
-                st.warning("PDF me koi images nahi mili.")
+                st.warning("PDF me koi Right-side Image nahi mili.")
