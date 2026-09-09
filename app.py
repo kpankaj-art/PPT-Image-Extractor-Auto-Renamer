@@ -1,134 +1,175 @@
 import io
-import re
+import json
 import zipfile
 import gc
-import fitz  # PyMuPDF
 import streamlit as st
+from pptx import Presentation
 from PIL import Image
+from google import genai
+from google.genai import types
 
-st.set_page_config(page_title="PDF Precision Cropper", page_icon="🖼️", layout="wide")
+st.set_page_config(page_title="PPT AI Image Extractor", page_icon="🖼️", layout="wide")
 
-st.title("🖼️ Exact Right Image Auto-Cropper (Full PDF Support)")
-st.write("Upload PDF to extract exact cropped images without missing any slide.")
+st.title("🖼️ Direct PPT Extractor (Merged Markings + Gemini AI)")
+st.write("Format: **OutletName_MobileNo_Type_Size.jpg**")
 
-st.sidebar.header("Crop Controls")
-target_pos = st.sidebar.radio("Konsi Photo Crop Karni Hai?", ["Right Image", "Left Image"])
+# Read Secret API Key automatically from Streamlit Secrets
+api_key = st.secrets.get("GEMINI_API_KEY") or st.sidebar.text_input("Gemini API Key", type="password")
 
-uploaded_pdf = st.file_uploader("📄 PDF File Upload Karein (.pdf)", type=["pdf"])
+if not api_key:
+    st.error("⚠️ GEMINI_API_KEY Streamlit Secrets me nahi mila! Kripya Settings -> Secrets check karein.")
+    st.stop()
 
-def extract_metadata(text):
-    """PDF text se details auto-extract karein"""
-    outlet_name = ""
-    contact_no = ""
-    media_type = ""
-    size = ""
+# Initialize Gemini Client
+client = genai.Client(api_key=api_key)
 
-    contact_match = re.search(r"\b[6-9]\d{9}\b", text)
-    if contact_match:
-        contact_no = contact_match.group(0)
+uploaded_ppt = st.file_uploader("📊 PPTX File Upload Karein (.pptx)", type=["pptx"])
 
-    outlet_match = re.search(r"Outlet\s*Name\s*[:\-]?\s*([^\n\r]+)", text, re.IGNORECASE)
-    if outlet_match:
-        raw = outlet_match.group(1).strip()
-        cleaned = re.split(r"Address", raw, flags=re.IGNORECASE)[0].strip()
-        outlet_name = re.sub(r'[^A-Za-z0-9]+', '_', cleaned).strip('_')
+def get_slide_merged_canvas(slide, slide_width, slide_height, scale=2.0):
+    """Slide ki base image aur top overlay shapes (Red boxes) ko single image par merge karta hai"""
+    canvas_w = int(slide_width * scale)
+    canvas_h = int(slide_height * scale)
+    canvas = Image.new("RGB", (canvas_w, canvas_h), (255, 255, 255))
+    
+    for shape in slide.shapes:
+        if shape.shape_type == 13:  # Embedded Picture shape
+            try:
+                img_data = io.BytesIO(shape.image.blob)
+                sub_img = Image.open(img_data).convert("RGBA")
+                
+                left = int((shape.left / slide_width) * canvas_w)
+                top = int((shape.top / slide_height) * canvas_h)
+                width = int((shape.width / slide_width) * canvas_w)
+                height = int((shape.height / slide_height) * canvas_h)
+                
+                sub_img = sub_img.resize((max(1, width), max(1, height)), Image.Resampling.LANCZOS)
+                canvas.paste(sub_img, (left, top), sub_img)
+            except Exception:
+                pass
 
-    type_match = re.search(r"\b(NL|FL|BL|SB|GSB|NON-LIT|FLEX)\b", text, re.IGNORECASE)
-    if type_match:
-        media_type = type_match.group(1).upper()
+    return canvas
 
-    size_match = re.search(r"(\d{1,3}\s*x\s*\d{1,3})", text, re.IGNORECASE)
-    if size_match:
-        size = size_match.group(1).replace(" ", "")
+def call_gemini_vision(canvas_img, slide_text, slide_num):
+    """Gemini 2.5 Flash se text details aur Right Image Bounding Box read karwana"""
+    prompt = f"""
+    This is presentation Slide {slide_num}. Text on slide: "{slide_text}"
 
-    return outlet_name, contact_no, media_type, size
+    Analyze this rendered slide image and perform:
+    1. Extract "outlet_name": Name of the Shop/Outlet.
+    2. Extract "contact_no": 10-digit Mobile Number.
+    3. Extract "media_type": Type like NL, FL, BL, GSB, FLEX.
+    4. Extract "size": Dimensions (e.g. 10x2).
+    5. Locate the RIGHT SIDE / FAR VIEW photo container (including red markings/boxes and map stamps inside it).
+       Return "box_2d": Normalized bounding box coordinates [ymin, xmin, ymax, xmax] (scale 0 to 1000).
 
-if uploaded_pdf is not None:
-    pdf_bytes = uploaded_pdf.getvalue()
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    total_pages = len(doc)
-    st.success(f"✅ Total Pages/Slides Found: {total_pages}")
+    Return ONLY JSON format:
+    {{
+        "outlet_name": "STRING",
+        "contact_no": "STRING",
+        "media_type": "STRING",
+        "size": "STRING",
+        "box_2d": [ymin, xmin, ymax, xmax]
+    }}
+    """
 
-    if st.button("🚀 Process ALL Slides"):
+    img_bytes = io.BytesIO()
+    canvas_img.save(img_bytes, format="JPEG", quality=85)
+    
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_bytes(data=img_bytes.getvalue(), mime_type="image/jpeg"),
+                prompt
+            ],
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        return json.loads(response.text)
+    except Exception:
+        return None
+
+if uploaded_ppt is not None:
+    prs = Presentation(uploaded_ppt)
+    total_slides = len(prs.slides)
+    st.sidebar.success(f"✅ Total Slides: {total_slides}")
+
+    slide_w = prs.slide_width
+    slide_h = prs.slide_height
+
+    # Batching controls to manage memory and API rate limits
+    start_slide = st.sidebar.number_input("Start Slide", min_value=1, max_value=total_slides, value=1)
+    end_slide = st.sidebar.number_input("End Slide", min_value=1, max_value=total_slides, value=min(total_slides, 50))
+
+    if st.button("🚀 Process & Extract Cropped Images"):
         zip_buffer = io.BytesIO()
         progress_bar = st.progress(0)
         status_text = st.empty()
 
+        slides_range = range(start_slide - 1, end_slide)
+        total_batch = len(slides_range)
+
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-            for i in range(total_pages):
-                page = doc.load_page(i)
-                status_text.text(f"Processing Slide {i+1} of {total_pages}...")
-                progress_bar.progress((i + 1) / total_pages)
+            for idx, i in enumerate(slides_range):
+                slide = prs.slides[i]
+                status_text.text(f"Processing Slide {i+1} of {total_slides}...")
+                progress_bar.progress((idx + 1) / total_batch)
 
-                text = page.get_text("text")
-                outlet_name, contact_no, media_type, size = extract_metadata(text)
+                # Extract Text from Slide shapes
+                slide_text = []
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        for p in shape.text_frame.paragraphs:
+                            if p.text.strip():
+                                slide_text.append(p.text.strip())
+                full_text = " ".join(slide_text)
 
-                components = []
-                if outlet_name:
-                    components.append(outlet_name)
-                else:
-                    components.append(f"SLIDE_{i+1}")
-                if contact_no:
-                    components.append(contact_no)
-                if media_type:
-                    components.append(media_type)
-                if size:
-                    components.append(size)
+                # Render Canvas Image (Base image + Red overlays merged)
+                canvas_img = get_slide_merged_canvas(slide, slide_w, slide_h, scale=2.0)
+                cw, ch = canvas_img.size
 
-                final_name = "_".join(components) + ".jpg"
+                # Call Gemini Vision API
+                ai_res = call_gemini_vision(canvas_img, full_text, i+1)
 
-                # High Quality Page Pixmap Render
-                mat = fitz.Matrix(2.0, 2.0)
-                pix = page.get_pixmap(matrix=mat)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                if ai_res:
+                    name = ai_res.get("outlet_name", f"SLIDE_{i+1}").replace(" ", "_")
+                    mobile = ai_res.get("contact_no", "")
+                    m_type = ai_res.get("media_type", "")
+                    m_size = ai_res.get("size", "").replace(" ", "")
 
-                # Slide ke embedded images ki exact positions detect karna
-                images_info = page.get_image_info()
-                
-                cropped_img = None
-                
-                if len(images_info) >= 2:
-                    # Sort images Left to Right
-                    sorted_imgs = sorted(images_info, key=lambda x: x['bbox'][0])
-                    
-                    selected_info = sorted_imgs[1] if target_pos == "Right Image" else sorted_imgs[0]
-                    bbox = selected_info['bbox']
-                    
-                    # Convert bounding box to scaled pixels
-                    x0 = int(bbox[0] * 2.0)
-                    y0 = int(bbox[1] * 2.0)
-                    x1 = int(bbox[2] * 2.0)
-                    y1 = int(bbox[3] * 2.0)
+                    components = [c for c in [name, mobile, m_type, m_size] if c]
+                    filename = "_".join(components) + ".jpg"
 
-                    cropped_img = img.crop((x0, y0, x1, y1))
-
-                # Dynamic fallback agar embedded bbox read na ho paye
-                if cropped_img is None or cropped_img.width < 50:
-                    w, h = img.size
-                    if target_pos == "Right Image":
-                        crop_box = (int(w * 0.50), int(h * 0.35), int(w * 0.74), int(h * 0.78))
+                    box = ai_res.get("box_2d")
+                    if box and len(box) == 4:
+                        ymin, xmin, ymax, xmax = box
+                        crop_coords = (
+                            int((xmin / 1000.0) * cw),
+                            int((ymin / 1000.0) * ch),
+                            int((xmax / 1000.0) * cw),
+                            int((ymax / 1000.0) * ch)
+                        )
+                        cropped = canvas_img.crop(crop_coords)
                     else:
-                        crop_box = (int(w * 0.25), int(h * 0.35), int(w * 0.49), int(h * 0.78))
-                    cropped_img = img.crop(crop_box)
+                        # Fallback Right Image Coordinates
+                        cropped = canvas_img.crop((int(cw * 0.50), int(ch * 0.35), int(cw * 0.74), int(ch * 0.78)))
+                else:
+                    filename = f"SLIDE_{i+1}.jpg"
+                    cropped = canvas_img.crop((int(cw * 0.50), int(ch * 0.35), int(cw * 0.74), int(ch * 0.78)))
 
-                img_byte_arr = io.BytesIO()
-                cropped_img.save(img_byte_arr, format="JPEG", quality=90)
-                zip_file.writestr(final_name, img_byte_arr.getvalue())
+                # Write image to ZIP
+                out_b = io.BytesIO()
+                cropped.save(out_b, format="JPEG", quality=92)
+                zip_file.writestr(filename, out_b.getvalue())
 
-                del pix
-                del img
-                del cropped_img
-                if i % 10 == 0:
-                    gc.collect()
-
-        doc.close()
-        gc.collect()
+                del canvas_img
+                del cropped
+                gc.collect()
 
         status_text.text("Processing Complete!")
-        st.success(f"🎉 Successfully processed ALL {total_pages} slides!")
+        st.success(f"🎉 Processed slides {start_slide} to {end_slide} successfully!")
         st.download_button(
-            label="📥 Download Cropped Images (ZIP)",
+            label=f"📥 Download Slides {start_slide}-{end_slide} (ZIP)",
             data=zip_buffer.getvalue(),
-            file_name="Cropped_Right_Images_All.zip",
+            file_name=f"Cropped_Images_{start_slide}_to_{end_slide}.zip",
             mime="application/zip",
         )
