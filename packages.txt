@@ -1,2 +1,0 @@
-poppler-utils
-libreoffice-impress-nogui
