@@ -9,34 +9,42 @@ st.title("PDF Far-View (Right Image) Crop & Renamer")
 
 
 def extract_metadata_from_text(text_data):
-    """PDF text se Metadata Extract karne ke liye."""
+    """Clean aur robust Regex parser for PDF layout."""
+    # Text me se newline issues clear karna
+    clean_text = " ".join(text_data.split())
+
     outlet_name = "OUTLET"
     contact = "0000000000"
     media_type = "NL"
     size = "0x0"
 
+    # Outlet Name Match
     outlet_match = re.search(
-        r"Outlet Name:\s*([^\n\r]+)", text_data, re.IGNORECASE
+        r"Outlet\s*Name\s*:\s*([^:\n\r]+?)(?=\s*City|\s*Address|\s*Contact|\s*Type|$)",
+        clean_text,
+        re.IGNORECASE,
     )
     if outlet_match:
-        outlet_name = (
-            outlet_match.group(1).strip().replace(" ", "_").upper()
-        )
+        raw_name = outlet_match.group(1).strip()
+        # Non-alphanumeric characters clean karna
+        cleaned = re.sub(r"[^\w\s-]", "", raw_name)
+        outlet_name = re.sub(r"\s+", "_", cleaned).upper()
 
-    contact_match = re.search(
-        r"Contact No:\s*(\d{10})", text_data, re.IGNORECASE
-    )
+    # Contact Match
+    contact_match = re.search(r"Contact\s*No\s*:\s*(\d{10})", clean_text, re.IGNORECASE)
     if contact_match:
         contact = contact_match.group(1).strip()
 
+    # Type Match
     type_match = re.search(
-        r"Type:\s*([A-Za-z0-9]+)", text_data, re.IGNORECASE
+        r"Type\s*:\s*([A-Za-z0-9_-]+)", clean_text, re.IGNORECASE
     )
     if type_match:
         media_type = type_match.group(1).strip().upper()
 
+    # Size Match (e.g., Size: 10 x 2)
     size_match = re.search(
-        r"Size:\s*(\d+)\s*x\s*(\d+)", text_data, re.IGNORECASE
+        r"Size\s*:\s*(\d+)\s*[xX*]\s*(\d+)", clean_text, re.IGNORECASE
     )
     if size_match:
         size = f"{size_match.group(1)}x{size_match.group(2)}"
@@ -44,9 +52,7 @@ def extract_metadata_from_text(text_data):
     return f"{outlet_name}_{contact}_{media_type}_{size}"
 
 
-uploaded_file = st.file_uploader(
-    "Apni PDF File Upload Karein", type=["pdf"]
-)
+uploaded_file = st.file_uploader("Apni PDF File Upload Karein", type=["pdf"])
 
 if uploaded_file is not None:
     if st.button("Extract Right Image & Rename"):
@@ -60,14 +66,15 @@ if uploaded_file is not None:
                 zip_buffer, "a", zipfile.ZIP_DEFLATED, False
             ) as zip_file:
                 for page_idx, page in enumerate(doc):
+                    # Text Extraction
                     page_text = page.get_text()
                     filename_prefix = extract_metadata_from_text(page_text)
 
-                    # Page Width nikal kar center X boundary decide karte hain
+                    # Agar outlet ka naam na mile to log alert dekhein
                     page_rect = page.rect
                     mid_x = page_rect.width / 2
 
-                    zoom = 3  # High-quality DPI output
+                    zoom = 3  # High Quality Output (300 DPI)
                     mat = fitz.Matrix(zoom, zoom)
 
                     image_list = page.get_images(full=True)
@@ -78,14 +85,12 @@ if uploaded_file is not None:
                         rects = page.get_image_rects(xref)
 
                         for rect in rects:
-                            # 📍 LOGIC: Sirf wahi image crop hogi jo Center point ke RIGHT side me hai
-                            if rect.x0 >= mid_x * 0.8:
+                            # Screen ke RIGHT part wali image select karna (Far View)
+                            if rect.x0 >= mid_x * 0.7:
                                 pix = page.get_pixmap(matrix=mat, clip=rect)
                                 img_data = pix.tobytes("png")
 
-                                final_name = (
-                                    f"{filename_prefix}_{img_idx}.png"
-                                )
+                                final_name = f"{filename_prefix}_{img_idx}.png"
                                 zip_file.writestr(final_name, img_data)
 
                                 img_idx += 1
@@ -95,13 +100,13 @@ if uploaded_file is not None:
 
             if extracted_count > 0:
                 st.success(
-                    f"Total {extracted_count} Right Images (Far View) successfully cropped & saved!"
+                    f"Total {extracted_count} Images cropped and renamed properly!"
                 )
                 st.download_button(
                     label="Download Cropped ZIP",
                     data=zip_buffer.getvalue(),
-                    file_name="far_view_outlet_images.zip",
+                    file_name="outlet_far_views.zip",
                     mime="application/zip",
                 )
             else:
-                st.warning("PDF me koi Right-side Image nahi mili.")
+                st.warning("PDF me Right-side wali image nahi mil saki.")
