@@ -1,23 +1,15 @@
 import io
 import re
 import zipfile
+import fitz  # PyMuPDF
 from PIL import Image
-from pptx import Presentation
-from pptx.enum.shapes import MSO_SHAPE_TYPE
 import streamlit as st
 
-st.set_page_config(
-    page_title="PPT Auto-Crop & Renamer", layout="centered"
-)
-st.title("PPT Image Crop & Auto-Renamer")
+st.set_page_config(page_title="PDF Auto-Crop & Renamer", layout="centered")
+st.title("PDF Image Crop & Auto-Renamer")
 
 
-def extract_metadata(slide):
-    text_data = ""
-    for shape in slide.shapes:
-        if shape.has_text_frame:
-            text_data += " " + shape.text_frame.text
-
+def extract_metadata_from_text(text_data):
     outlet_name = "OUTLET"
     contact = "0000000000"
     media_type = "NL"
@@ -53,42 +45,59 @@ def extract_metadata(slide):
 
 
 uploaded_file = st.file_uploader(
-    "Apni PPTX File Upload Karein", type=["pptx"]
+    "Apni PDF File Upload Karein", type=["pdf"]
 )
 
 if uploaded_file is not None:
-    if st.button("Extract & Auto-Name Images"):
-        with st.spinner("Processing slides..."):
-            prs = Presentation(uploaded_file)
+    if st.button("Extract, Crop & Auto-Name Images"):
+        with st.spinner("Processing PDF pages..."):
+            pdf_bytes = uploaded_file.read()
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             zip_buffer = io.BytesIO()
             extracted_count = 0
 
             with zipfile.ZipFile(
                 zip_buffer, "a", zipfile.ZIP_DEFLATED, False
             ) as zip_file:
-                for idx, slide in enumerate(prs.slides):
-                    filename_prefix = extract_metadata(slide)
+                for page_idx, page in enumerate(doc):
+                    page_text = page.get_text()
+                    filename_prefix = extract_metadata_from_text(page_text)
+
+                    # Quality high karne ke liye zoom factor (3 = 300 DPI approx)
+                    zoom = 3
+                    mat = fitz.Matrix(zoom, zoom)
+
+                    image_list = page.get_images(full=True)
                     img_idx = 1
 
-                    for shape in slide.shapes:
-                        if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                            image_bytes = shape.image.blob
-                            image_ext = shape.image.ext
+                    for img_info in image_list:
+                        xref = img_info[0]
+                        rects = page.get_image_rects(xref)
 
-                            final_name = f"{filename_prefix}_{img_idx}.{image_ext}"
-                            zip_file.writestr(final_name, image_bytes)
+                        for rect in rects:
+                            # 📍 YEHA PAR AAYEGA 'clip=rect'
+                            pix = page.get_pixmap(matrix=mat, clip=rect)
+
+                            img_data = pix.tobytes("png")
+                            final_name = (
+                                f"{filename_prefix}_{img_idx}.png"
+                            )
+
+                            zip_file.writestr(final_name, img_data)
                             img_idx += 1
                             extracted_count += 1
 
+            doc.close()
+
             if extracted_count > 0:
                 st.success(
-                    f"Total {extracted_count} images successfully renamed & extracted!"
+                    f"Total {extracted_count} images successfully cropped & saved!"
                 )
                 st.download_button(
-                    label="Download Renamed ZIP",
+                    label="Download Cropped ZIP",
                     data=zip_buffer.getvalue(),
-                    file_name="renamed_outlet_images.zip",
+                    file_name="cropped_outlet_images.zip",
                     mime="application/zip",
                 )
             else:
-                st.warning("PPT mein koi images nahi mili.")
+                st.warning("PDF me koi images nahi mili.")
