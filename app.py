@@ -618,13 +618,13 @@ def make_zip(results):
 
 st.title("🖼️ PPT Image + Markup Extractor")
 st.write(
-    "Upload the PowerPoint and the photos placed on it. "
-    "Extract as separate PNG images with markup."
+    "Upload a PowerPoint file to extract photos as separate PNG images "
+    "with any PowerPoint markup merged onto the corresponding photo."
 )
 
 st.info(
-    "This tool identifies the fallback image for PowerPoint's Ink/markup "
-    "It merges it onto the same photo at the correct position."
+    "This tool detects PowerPoint Ink/markup fallback images and "
+    "merges them onto the corresponding photo at the correct position."
 )
 
 uploaded_file = st.file_uploader(
@@ -653,7 +653,7 @@ if uploaded_file:
             )
 
         try:
-            with st.spinner("PPT process हो रही है..."):
+            with st.spinner("Processing PowerPoint file..."):
                 results, stats = process_pptx(
                     uploaded_file,
                     image_selection=image_selection,
@@ -665,8 +665,8 @@ if uploaded_file:
 
             if not results:
                 st.error(
-                    "No image found. Please make sure that the PPTX "
-                    "The file is valid."
+                    "No images were found. Please make sure the uploaded "
+                    "PPTX file is valid and contains images."
                 )
             else:
                 col1, col2, col3 = st.columns(3)
@@ -675,7 +675,7 @@ if uploaded_file:
                 col3.metric("Markup merged", stats["merged"])
 
                 st.success(
-                    f"{len(results)} Images are ready."
+                    f"Successfully generated {len(results)} images."
                 )
 
                 zip_bytes = make_zip(results)
@@ -705,12 +705,12 @@ if uploaded_file:
 
                 if len(results) > 6:
                     st.caption(
-                        f"First 6 images are shown in the preview. "
-                        f"All the images are {len(results)} in the ZIP file."
+                        f"Showing the first 6 images in the preview. "
+                        f"The ZIP file contains all {len(results)} images."
                     )
 
         except zipfile.BadZipFile:
-            st.error("This doesn't look like a valid PPTX file.")
+            st.error("The uploaded file does not appear to be a valid PPTX file.")
         except Exception as e:
             st.error(f"Processing error: {e}")
             st.exception(e)
